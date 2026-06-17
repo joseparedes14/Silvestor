@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+*.pyo
+histograms/
+.DS_Store
