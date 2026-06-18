@@ -11,6 +11,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import io
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import yfinance as yf
 
 FT_BASE = "https://markets.ft.com/data/funds/tearsheet"
 HEADERS = {
@@ -27,6 +29,42 @@ _AJAX_HEADERS = {
     "Referer": "https://markets.ft.com/data/funds/tearsheet/charts",
 }
 HIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "histograms")
+
+_tipo_cambio_cache = {"rate": None}
+
+
+def obtener_tipo_cambio(origen: str = "USD", destino: str = "EUR") -> Optional[float]:
+    if _tipo_cambio_cache["rate"] is not None:
+        return _tipo_cambio_cache["rate"]
+    try:
+        pair = f"{destino}{origen}=X"
+        ticker = yf.Ticker(pair)
+        data = ticker.history(period="1d")
+        if data.empty:
+            data = ticker.history(period="5d")
+        if not data.empty:
+            _tipo_cambio_cache["rate"] = float(data["Close"].iloc[-1])
+            return _tipo_cambio_cache["rate"]
+    except Exception:
+        pass
+    return None
+
+
+def limpiar_cache_tipo_cambio():
+    _tipo_cambio_cache["rate"] = None
+
+
+def convertir_a_eur(valor, moneda_origen="USD", tipo_cambio=None):
+    if valor is None:
+        return None
+    if moneda_origen == "EUR":
+        return round(valor, 2)
+    if tipo_cambio is None:
+        tipo_cambio = obtener_tipo_cambio()
+    if tipo_cambio is None or tipo_cambio == 0:
+        return None
+    eur = valor / tipo_cambio
+    return round(eur, 2)
 
 
 def _extraer_precio(soup: BeautifulSoup) -> Optional[float]:
@@ -429,44 +467,90 @@ def generar_histograma_personal(
     os.makedirs(HIST_DIR, exist_ok=True)
     precios = df["close"].values
     fechas = df["fecha"].values
-    valor_posicion = participaciones * precios
+
+    tc = obtener_tipo_cambio()
+    if tc:
+        precios_eur = precios / tc
+    else:
+        precios_eur = precios.copy()
+
+    valor_posicion = participaciones * precios_eur
     pnl_diario = np.diff(valor_posicion)
+
     if len(pnl_diario) < 4:
         return None
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.hist(pnl_diario, bins=40, edgecolor="white", color="#1f77b4", alpha=0.8)
-    media = np.mean(pnl_diario)
-    mediana = np.median(pnl_diario)
-    desv = np.std(pnl_diario)
-    ax.axvline(media, color="red", linestyle="dashed", linewidth=1.5,
-               label=f"Media: ${media:.2f}")
-    ax.axvline(mediana, color="orange", linestyle="dashed", linewidth=1.5,
-               label=f"Mediana: ${mediana:.2f}")
-    ax.axvline(media + desv, color="gray", linestyle="dotted", linewidth=1, alpha=0.7)
-    ax.axvline(media - desv, color="gray", linestyle="dotted", linewidth=1, alpha=0.7)
-    ax.set_xlabel("P&L Diario ($)", fontsize=11)
-    ax.set_ylabel("Frecuencia", fontsize=11)
-    valor_actual = valor_posicion[-1]
-    ganancia = valor_actual - total_invertido
-    ganancia_pct = (ganancia / total_invertido) * 100 if total_invertido else 0
-    titulo = (f"P&L Diario de tu Posicion - {nombre or identificador}\n"
-              f"{participaciones:.4f} part. | Invertido: ${total_invertido:,.2f} | "
-              f"Actual: ${valor_actual:,.2f} ({ganancia_pct:+.2f}%)")
-    ax.set_title(titulo, fontsize=12, fontweight="bold")
-    ax.legend(fontsize=10)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    plt.tight_layout()
+
+    total_invertido_eur = total_invertido / tc if tc else total_invertido
+    valor_actual_eur = valor_posicion[-1]
+    ganancia_eur = valor_actual_eur - total_invertido_eur
+    ganancia_pct = (ganancia_eur / total_invertido_eur) * 100 if total_invertido_eur else 0
+    pnl_acumulado = valor_posicion - total_invertido_eur
+
+    wins = pnl_diario[pnl_diario > 0]
+    losses = pnl_diario[pnl_diario <= 0]
+    win_rate = (len(wins) / len(pnl_diario)) * 100
+    media = float(np.mean(pnl_diario))
+    mediana = float(np.median(pnl_diario))
+    mejor_dia = float(np.max(pnl_diario))
+    peor_dia = float(np.min(pnl_diario))
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+
+    ax1.hist(wins, bins=20, color="#2e7d32", alpha=0.8, label=f"Días ganadores: {len(wins)}")
+    ax1.hist(losses, bins=20, color="#d32f2f", alpha=0.8, label=f"Días perdedores: {len(losses)}")
+    ax1.axvline(media, color="#1565c0", linestyle="dashed", linewidth=1.5, label=f"Media: €{media:.2f}")
+    ax1.axvline(mediana, color="#ff8f00", linestyle="dashed", linewidth=1.5, label=f"Mediana: €{mediana:.2f}")
+    ax1.axvline(0, color="black", linewidth=0.8)
+    ax1.set_xlabel("P&L Diario (EUR)", fontsize=11)
+    ax1.set_ylabel("Frecuencia", fontsize=11)
+    ax1.set_title(f"Distribución P&L Diario · Win Rate: {win_rate:.1f}%", fontsize=12, fontweight="bold")
+    ax1.legend(fontsize=8, loc="upper right")
+    ax1.spines["top"].set_visible(False)
+    ax1.spines["right"].set_visible(False)
+
+    x_acum = range(len(pnl_acumulado))
+    ax2.fill_between(x_acum, pnl_acumulado, 0,
+                     where=(pnl_acumulado >= 0), color="#2e7d32", alpha=0.25, label="Ganancia")
+    ax2.fill_between(x_acum, pnl_acumulado, 0,
+                     where=(pnl_acumulado < 0), color="#d32f2f", alpha=0.25, label="Pérdida")
+    ax2.plot(x_acum, pnl_acumulado, color="#1565c0", linewidth=1.5)
+    ax2.axhline(0, color="black", linewidth=0.8)
+    ax2.set_xlabel("Días desde la primera compra", fontsize=11)
+    ax2.set_ylabel("P&L Acumulado (EUR)", fontsize=11)
+
+    pnl_final = pnl_acumulado[-1]
+    if pnl_final >= 0:
+        label_final = f"GANANCIA TOTAL: €{pnl_final:+.2f}"
+        color_final = "#2e7d32"
+    else:
+        label_final = f"PÉRDIDA TOTAL: €{pnl_final:+.2f}"
+        color_final = "#d32f2f"
+    ax2.set_title(label_final, fontsize=13, fontweight="bold", color=color_final)
+    ax2.legend(fontsize=9, loc="upper left")
+    ax2.spines["top"].set_visible(False)
+    ax2.spines["right"].set_visible(False)
+
+    fig.suptitle(
+        f"{nombre or identificador}  ·  {participaciones:.4f} participaciones\n"
+        f"Invertido: €{total_invertido_eur:,.2f}  ·  "
+        f"Valor actual: €{valor_actual_eur:,.2f}  ·  "
+        f"Resultado: €{ganancia_eur:+.2f} ({ganancia_pct:+.2f}%)  ·  "
+        f"Mejor día: €{mejor_dia:+.2f}  ·  Peor día: €{peor_dia:+.2f}",
+        fontsize=11, fontweight="bold", y=0.98
+    )
+
+    plt.tight_layout(rect=[0, 0, 1, 0.92])
     filename = f"pnl_{identificador.replace(':', '_').replace('.', '_')}.png"
     filepath = os.path.join(HIST_DIR, filename)
-    plt.savefig(filepath, dpi=120)
+    plt.savefig(filepath, dpi=120, bbox_inches="tight")
     plt.close(fig)
     return filepath
 
 
 def obtener_portfolio_completo(items: list[dict]) -> list[dict]:
-    resultados = []
-    for item in items:
+    resultados = [None] * len(items)
+
+    def procesar(i, item):
         pos = calcular_posicion(
             item["isin"],
             item["total_participaciones"],
@@ -474,5 +558,12 @@ def obtener_portfolio_completo(items: list[dict]) -> list[dict]:
             item.get("ticker"),
         )
         pos["nombre"] = item.get("nombre") or pos.get("nombre", "")
-        resultados.append(pos)
+        return i, pos
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futuros = {executor.submit(procesar, i, item): i for i, item in enumerate(items)}
+        for futuro in as_completed(futuros):
+            i, pos = futuro.result()
+            resultados[i] = pos
+
     return resultados

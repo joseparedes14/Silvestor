@@ -3,6 +3,7 @@ from tkinter import ttk, messagebox
 from datetime import datetime
 import threading
 import os
+from PIL import Image
 
 from database import (
     init_db, agregar_transaccion, listar_transacciones,
@@ -11,8 +12,10 @@ from database import (
 from fondos import (
     obtener_info_fondo, obtener_precio_actual, obtener_precio_historico_en_fecha,
     obtener_datos_historicos,
-    generar_histograma_personal, generar_reporte_rendimiento
+    generar_histograma_personal, generar_reporte_rendimiento,
+    obtener_tipo_cambio, convertir_a_eur
 )
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from database import obtener_resumen_isin
 
 ctk.set_appearance_mode("dark")
@@ -21,8 +24,8 @@ ctk.set_default_color_theme("green")
 
 def formatear(valor):
     if valor is None:
-        return "$ ---"
-    return f"${valor:,.2f}"
+        return "---"
+    return f"€{valor:,.2f}"
 
 
 
@@ -40,6 +43,11 @@ class App(ctk.CTk):
         self._build_header()
         self._build_tabs()
         self._build_statusbar()
+
+    def _obtener_tc(self):
+        if not hasattr(self, "_tc") or self._tc is None:
+            self._tc = obtener_tipo_cambio()
+        return self._tc
 
     def _build_header(self):
         header = ctk.CTkFrame(self, corner_radius=0, height=50)
@@ -156,10 +164,14 @@ class App(ctk.CTk):
                 diff = precio_actual - precio_historico
                 diff_pct = (diff / precio_historico) * 100
                 color = "green" if diff >= 0 else "red"
+                tc = self._obtener_tc()
+                ph_eur = convertir_a_eur(precio_historico, tipo_cambio=tc)
+                pa_eur = convertir_a_eur(precio_actual, tipo_cambio=tc)
+                diff_eur = convertir_a_eur(diff, tipo_cambio=tc)
                 self.lbl_comparacion.configure(
-                    text=f"NAV en fecha: ${precio_historico:.2f}  |  "
-                         f"NAV actual: ${precio_actual:.2f}  |  "
-                         f"Cambio: [{color}]{diff:+.2f} ({diff_pct:+.2f}%)[/]"
+                    text=f"NAV en fecha: €{ph_eur:.2f}  |  "
+                         f"NAV actual: €{pa_eur:.2f}  |  "
+                         f"Cambio: [{color}]{diff_eur:+.2f}€ ({diff_pct:+.2f}%)"
                 )
         else:
             if precio_actual:
@@ -209,8 +221,13 @@ class App(ctk.CTk):
         total = round(participaciones * precio, 2)
         trans_id = agregar_transaccion(isin, nombre, tipo, participaciones, precio, total, fecha, ticker=ticker)
 
+        tc = self._obtener_tc()
+        total_eur = convertir_a_eur(total, tipo_cambio=tc)
         self.set_status(f"Transacción #{trans_id} registrada: {tipo} de {participaciones} {isin}")
-        messagebox.showinfo("OK", f"Transacción registrada (ID: {trans_id})\nTotal: ${total:,.2f}")
+        if total_eur is not None:
+            messagebox.showinfo("OK", f"Transacción registrada (ID: {trans_id})\nTotal: €{total_eur:,.2f}")
+        else:
+            messagebox.showinfo("OK", f"Transacción registrada (ID: {trans_id})\nTotal: ${total:,.2f}")
 
         self.entry_isin.delete(0, "end")
         self.entry_ticker.delete(0, "end")
@@ -220,7 +237,8 @@ class App(ctk.CTk):
         self.entry_fecha.delete(0, "end")
         self.lbl_total.configure(text="")
         self.tabview.set("Inversiones")
-        self._refrescar_inversiones()
+        self._cargar_inversiones_inicial()
+        self._refrescar_inversiones_background()
 
     def _build_tab_inversiones(self):
         self.tab_inversiones.grid_rowconfigure(0, weight=1)
@@ -260,71 +278,107 @@ class App(ctk.CTk):
         self.tree_inversiones.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
 
-        # Botones
         btn_frame = ctk.CTkFrame(self.tab_inversiones, fg_color="transparent")
         btn_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 5))
-        ctk.CTkButton(btn_frame, text="Actualizar NAVs", command=self._refrescar_inversiones).pack(side="left", padx=5)
+        ctk.CTkButton(btn_frame, text="Actualizar NAVs", command=self._refrescar_inversiones_background).pack(side="left", padx=5)
         ctk.CTkButton(btn_frame, text="Eliminar Seleccionada", command=self._eliminar_transaccion).pack(side="right", padx=5)
 
         self.lbl_resumen_inv = ctk.CTkLabel(self.tab_inversiones, text="", font=("Segoe UI", 14, "bold"))
         self.lbl_resumen_inv.grid(row=2, column=0, sticky="ew", padx=15, pady=(0, 8))
 
-        self._refrescar_inversiones()
+        self._cargar_inversiones_inicial()
+        self.after(200, self._refrescar_inversiones_background)
 
-    def _refrescar_inversiones(self):
+    def _cargar_inversiones_inicial(self):
         for row in self.tree_inversiones.get_children():
             self.tree_inversiones.delete(row)
-
         transacciones = listar_transacciones()
         if not transacciones:
             self.lbl_resumen_inv.configure(text="No hay transacciones. Agrega una en la pestaña 'Agregar'.")
             return
-
-        nav_cache = {}
+        tc = self._obtener_tc()
+        total_inv_eur = 0
         for t in transacciones:
-            isin = t["isin"]
-            if isin not in nav_cache:
-                nav_cache[isin] = obtener_precio_actual(isin)
+            moneda = t.get("moneda", "USD")
+            part = t["participaciones"]
+            precio_eur = convertir_a_eur(t["precio"], moneda, tc)
+            total_eur = convertir_a_eur(t["total"], moneda, tc)
+            total_inv_eur += total_eur or 0
+            self.tree_inversiones.insert("", "end", values=(
+                t["id"], t["fecha"], t["isin"], t["nombre"][:35], t["tipo"],
+                f"{part:.4f}", formatear(precio_eur), "---", "---", formatear(total_eur),
+            ))
+        self.lbl_resumen_inv.configure(text=f"Total invertido: {formatear(total_inv_eur)}  |  Actualizando NAVs...")
+        self.set_status("Cargando datos iniciales...")
 
-        total_inv = 0
-        total_val = 0
+    def _refrescar_inversiones_background(self):
+        threading.Thread(target=self._fetch_navs_thread, daemon=True).start()
+
+    def _fetch_navs_thread(self):
+        transacciones = listar_transacciones()
+        if not transacciones:
+            return
+        isins_unicos = list({t["isin"] for t in transacciones})
+        nav_cache = {}
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futuros = {executor.submit(obtener_precio_actual, isin): isin for isin in isins_unicos}
+            for futuro in as_completed(futuros):
+                isin = futuros[futuro]
+                try:
+                    nav_cache[isin] = futuro.result()
+                except Exception:
+                    nav_cache[isin] = None
+        tc = self._obtener_tc()
+        self.after(0, self._actualizar_con_navs, transacciones, nav_cache, tc)
+
+    def _actualizar_con_navs(self, transacciones, nav_cache, tc):
+        for row in self.tree_inversiones.get_children():
+            self.tree_inversiones.delete(row)
+
+        total_inv_eur = 0
+        total_val_eur = 0
 
         for t in transacciones:
             isin = t["isin"]
             nav_act = nav_cache.get(isin)
             precio_compra = t["precio"]
             part = t["participaciones"]
+            moneda = t.get("moneda", "USD")
 
-            if nav_act and precio_compra:
-                diff = nav_act - precio_compra
-                diff_pct = (diff / precio_compra) * 100
-                cambio_str = f"{diff:+.2f} ({diff_pct:+.2f}%)"
-                val_act = part * nav_act
+            precio_compra_eur = convertir_a_eur(precio_compra, moneda, tc)
+            nav_act_eur = convertir_a_eur(nav_act, moneda, tc) if nav_act else None
+
+            if nav_act_eur and precio_compra_eur:
+                diff_eur = round(nav_act_eur - precio_compra_eur, 2)
+                diff_pct = round((diff_eur / precio_compra_eur) * 100, 2) if precio_compra_eur else 0
+                cambio_str = f"€{diff_eur:+.2f}"
+                val_act_eur = round(part * nav_act_eur, 2)
+                cambio_str += f" ({diff_pct:+.2f}%)"
             else:
                 cambio_str = "---"
-                val_act = None
+                val_act_eur = None
 
-            total_inv += t["total"]
-            if val_act is not None:
-                total_val += val_act
+            total_inv_eur += convertir_a_eur(t["total"], moneda, tc) or 0
+            if val_act_eur is not None:
+                total_val_eur += val_act_eur
 
             self.tree_inversiones.insert("", "end", values=(
                 t["id"], t["fecha"], isin, t["nombre"][:35], t["tipo"],
-                f"{part:.4f}", formatear(precio_compra), formatear(nav_act),
-                cambio_str, formatear(t["total"]),
+                f"{part:.4f}", formatear(precio_compra_eur), formatear(nav_act_eur),
+                cambio_str, formatear(convertir_a_eur(t["total"], moneda, tc)),
             ))
 
-        if total_val > 0:
-            gan = total_val - total_inv
-            gan_pct = (gan / total_inv) * 100 if total_inv else 0
+        if total_val_eur > 0:
+            gan_eur = round(total_val_eur - total_inv_eur, 2)
+            gan_pct = round((gan_eur / total_inv_eur) * 100, 2) if total_inv_eur else 0
             self.lbl_resumen_inv.configure(
-                text=f"Total invertido: {formatear(total_inv)}  |  "
-                     f"Valor actual: {formatear(total_val)}  |  "
-                     f"Ganancia/Perdida: {formatear(gan)} ({gan_pct:+.2f}%)"
+                text=f"Total invertido: {formatear(total_inv_eur)}  |  "
+                     f"Valor actual: {formatear(total_val_eur)}  |  "
+                     f"Ganancia/Perdida Total: {formatear(gan_eur)} ({gan_pct:+.2f}%)"
             )
         else:
-            self.lbl_resumen_inv.configure(text=f"Total invertido: {formatear(total_inv)}")
-        self.set_status("Inversiones actualizadas.")
+            self.lbl_resumen_inv.configure(text=f"Total invertido: {formatear(total_inv_eur)}")
+        self.set_status("Inversiones actualizadas en EUR.")
 
     def _eliminar_transaccion(self):
         sel = self.tree_inversiones.selection()
@@ -336,36 +390,44 @@ class App(ctk.CTk):
         if messagebox.askyesno("Confirmar", f"¿Eliminar la transacción #{trans_id}?"):
             eliminar_transaccion(trans_id)
             self.set_status(f"Transacción #{trans_id} eliminada.")
-            self._refrescar_inversiones()
+            self._cargar_inversiones_inicial()
+            self._refrescar_inversiones_background()
 
     def _build_tab_rendimiento(self):
         self.tab_rendimiento.grid_rowconfigure(1, weight=1)
+        self.tab_rendimiento.grid_rowconfigure(2, weight=0)
         self.tab_rendimiento.grid_columnconfigure(0, weight=1)
-
-        top = ctk.CTkFrame(self.tab_rendimiento, fg_color="transparent")
-        top.grid(row=0, column=0, sticky="ew", pady=(5, 2))
-        top.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(top, text="Rendimiento e Histograma", font=("Segoe UI", 15, "bold")).pack(side="left", padx=10)
 
         frame_controls = ctk.CTkFrame(self.tab_rendimiento, fg_color="transparent")
         frame_controls.grid(row=0, column=0, sticky="ew", pady=(5, 2))
         frame_controls.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(frame_controls, text="ISIN:").grid(row=0, column=0, padx=(10, 5), pady=5)
+        ctk.CTkLabel(frame_controls, text="ISIN:", font=("Segoe UI", 13)).grid(row=0, column=0, padx=(10, 5), pady=5)
         self.entry_rend_isin = ctk.CTkEntry(frame_controls, placeholder_text="ISIN del fondo")
         self.entry_rend_isin.grid(row=0, column=1, sticky="ew", padx=5, pady=5)
 
         self.btn_rendimiento = ctk.CTkButton(frame_controls, text="Ver Rendimiento", command=self._ver_rendimiento)
         self.btn_rendimiento.grid(row=0, column=2, padx=5, pady=5)
-        self.btn_histograma = ctk.CTkButton(frame_controls, text="Generar Histograma", command=self._generar_histograma)
+        self.btn_histograma = ctk.CTkButton(frame_controls, text="Generar Gráfico P&L", command=self._generar_histograma)
         self.btn_histograma.grid(row=0, column=3, padx=5, pady=5)
+        self.btn_abrir_grafico = ctk.CTkButton(frame_controls, text="Abrir", width=60, command=self._abrir_grafico)
+        self.btn_abrir_grafico.grid(row=0, column=4, padx=5, pady=5)
 
-        self.txt_rendimiento = ctk.CTkTextbox(self.tab_rendimiento, font=("Consolas", 12), wrap="word")
-        self.txt_rendimiento.grid(row=1, column=0, sticky="nsew", padx=10, pady=5)
+        paned = ctk.CTkFrame(self.tab_rendimiento)
+        paned.grid(row=1, column=0, sticky="nsew", padx=10, pady=5)
+        paned.grid_rowconfigure(0, weight=1)
+        paned.grid_columnconfigure(0, weight=1)
+        paned.grid_columnconfigure(1, weight=2)
 
-        self.lbl_histograma = ctk.CTkLabel(self.tab_rendimiento, text="", font=("Segoe UI", 12))
-        self.lbl_histograma.grid(row=2, column=0, sticky="ew", padx=10, pady=5)
+        self.txt_rendimiento = ctk.CTkTextbox(paned, font=("Consolas", 12), wrap="word")
+        self.txt_rendimiento.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
+
+        self.lbl_histograma_img = ctk.CTkLabel(paned, text="Genera un gráfico para verlo aquí", anchor="center",
+                                                font=("Segoe UI", 13))
+        self.lbl_histograma_img.grid(row=0, column=1, sticky="nsew")
+
+        self.lbl_histograma_ruta = ctk.CTkLabel(self.tab_rendimiento, text="", font=("Segoe UI", 11))
+        self.lbl_histograma_ruta.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 5))
 
     def _ver_rendimiento(self):
         isin = self.entry_rend_isin.get().strip().upper()
@@ -417,12 +479,32 @@ class App(ctk.CTk):
         threading.Thread(target=task, daemon=True).start()
 
     def _mostrar_histograma_resultado(self, archivo, isin, msg=""):
+        self._ultimo_grafico = archivo
         if archivo and os.path.exists(archivo):
-            self.lbl_histograma.configure(text=f"Histograma de rendimiento personal guardado en: {archivo}")
+            try:
+                pil_img = Image.open(archivo)
+                ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(700, 350))
+                self.lbl_histograma_img.configure(image=ctk_img, text="")
+                self.lbl_histograma_img.image = ctk_img
+                self.lbl_histograma_ruta.configure(
+                    text=f"Gráfico guardado en: {archivo}",
+                    text_color="lightblue"
+                )
+                self.set_status(f"Gráfico P&L generado para {isin}.")
+            except Exception as e:
+                self.lbl_histograma_img.configure(text=f"Error al mostrar imagen: {e}", image="")
+                self.lbl_histograma_ruta.configure(text="")
         else:
-            self.lbl_histograma.configure(text=msg or "No se pudo generar el histograma (datos insuficientes).")
-        self.btn_histograma.configure(state="normal", text="Generar Histograma")
+            self.lbl_histograma_img.configure(text=msg or "No se pudo generar el gráfico (datos insuficientes).")
+            self.lbl_histograma_ruta.configure(text="")
+        self.btn_histograma.configure(state="normal", text="Generar Gráfico P&L")
         self.set_status("Proceso completado.")
+
+    def _abrir_grafico(self):
+        if hasattr(self, "_ultimo_grafico") and self._ultimo_grafico and os.path.exists(self._ultimo_grafico):
+            os.startfile(self._ultimo_grafico)
+        else:
+            messagebox.showinfo("Aviso", "Genera un gráfico primero.")
 
 
 if __name__ == "__main__":

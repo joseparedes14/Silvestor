@@ -1,4 +1,5 @@
 import click
+import os
 from datetime import datetime
 from rich.console import Console
 from rich.table import Table
@@ -7,16 +8,19 @@ from rich import box
 from database import init_db, agregar_transaccion, listar_transacciones, eliminar_transaccion, obtener_portfolio
 from fondos import (
     obtener_info_fondo, obtener_precio_actual, obtener_portfolio_completo,
-    obtener_datos_historicos, generar_histograma, generar_reporte_rendimiento, calcular_rendimientos
+    obtener_datos_historicos, generar_histograma, generar_reporte_rendimiento, calcular_rendimientos,
+    obtener_tipo_cambio, convertir_a_eur, limpiar_cache_tipo_cambio
 )
 
 console = Console()
 
 
-def _formatear_moneda(valor, moneda="USD") -> str:
+def _formatear_moneda(valor, moneda="EUR") -> str:
     if valor is None:
-        return f"{moneda} ---"
-    return f"{moneda}{valor:,.2f}"
+        return f"---"
+    simbolos = {"EUR": "€", "USD": "$", "MXN": "MX$"}
+    simbolo = simbolos.get(moneda, moneda + " ")
+    return f"{simbolo}{valor:,.2f}"
 
 
 def _color_ganancia(valor):
@@ -69,7 +73,8 @@ def historial(isin):
         console.print("[yellow]No hay transacciones registradas.[/yellow]")
         return
 
-    table = Table(box=box.SIMPLE)
+    tc = obtener_tipo_cambio()
+    table = Table(box=box.SIMPLE, title="Historial de Transacciones (EUR)")
     table.add_column("ID", style="cyan")
     table.add_column("Fecha", style="white")
     table.add_column("ISIN")
@@ -80,6 +85,7 @@ def historial(isin):
     table.add_column("Total", justify="right")
 
     for t in transacciones:
+        moneda = t.get("moneda", "USD")
         color_tipo = "green" if t["tipo"] == "compra" else "red"
         table.add_row(
             str(t["id"]),
@@ -88,8 +94,8 @@ def historial(isin):
             t["nombre"][:30],
             f"[{color_tipo}]{t['tipo']}[/{color_tipo}]",
             str(t["participaciones"]),
-            _formatear_moneda(t["precio"], t["moneda"]),
-            _formatear_moneda(t["total"], t["moneda"]),
+            _formatear_moneda(convertir_a_eur(t["precio"], moneda, tc)),
+            _formatear_moneda(convertir_a_eur(t["total"], moneda, tc)),
         )
 
     console.print(table)
@@ -134,7 +140,19 @@ def portfolio(actualizar):
             for p in items
         ]
 
-    table = Table(box=box.SIMPLE, title="Portafolio de Fondos")
+    tipo_cambio = None
+    if actualizar:
+        with console.status("[bold green]Obteniendo tipo de cambio EUR/USD..."):
+            tipo_cambio = obtener_tipo_cambio()
+
+    def _eur(valor, moneda):
+        if moneda == "EUR":
+            return valor
+        if tipo_cambio is None:
+            return valor
+        return round(valor / tipo_cambio, 2) if valor is not None else None
+
+    table = Table(box=box.SIMPLE, title="Portafolio de Fondos (EUR)")
     table.add_column("ISIN", style="cyan")
     table.add_column("Nombre")
     table.add_column("Particip.", justify="right")
@@ -145,48 +163,50 @@ def portfolio(actualizar):
     table.add_column("Ganancia", justify="right")
     table.add_column("Rent.", justify="right")
 
-    total_invertido = 0
-    total_valor = 0
+    total_invertido_eur = 0
+    total_valor_eur = 0
 
     for pos in posiciones:
-        p_prom = _formatear_moneda(pos["precio_promedio"])
-        p_act = _formatear_moneda(pos["precio_actual"])
-        inv = _formatear_moneda(pos["total_invertido"])
-        val = _formatear_moneda(pos["valor_actual"])
-        gan = pos["ganancia"]
-        gan_str = _formatear_moneda(gan) if gan is not None else "---"
-        gan_pct = f"{pos['ganancia_pct']:+.2f}%" if pos['ganancia_pct'] is not None else "---"
+        moneda = pos.get("moneda", "USD")
+        p_prom_eur = _eur(pos["precio_promedio"], moneda)
+        p_act_eur = _eur(pos["precio_actual"], moneda)
+        inv_eur = _eur(pos["total_invertido"], moneda)
+        val_eur = _eur(pos["valor_actual"], moneda)
+        gan_eur = _eur(pos["ganancia"], moneda)
 
-        total_invertido += pos["total_invertido"]
-        if pos["valor_actual"] is not None:
-            total_valor += pos["valor_actual"]
+        total_invertido_eur += inv_eur if inv_eur is not None else 0
+        if val_eur is not None:
+            total_valor_eur += val_eur
+
+        gan_str = _formatear_moneda(gan_eur) if gan_eur is not None else "---"
+        gan_pct = f"{pos['ganancia_pct']:+.2f}%" if pos['ganancia_pct'] is not None else "---"
 
         table.add_row(
             pos["isin"],
             pos.get("nombre", "")[:25],
             f"{pos['participaciones']:.4f}",
-            p_prom,
-            p_act,
-            inv,
-            val,
-            f"[{_color_ganancia(gan)}]{gan_str}[/{_color_ganancia(gan)}]",
+            _formatear_moneda(p_prom_eur),
+            _formatear_moneda(p_act_eur),
+            _formatear_moneda(inv_eur),
+            _formatear_moneda(val_eur),
+            f"[{_color_ganancia(gan_eur)}]{gan_str}[/{_color_ganancia(gan_eur)}]",
             f"[{_color_ganancia(pos['ganancia_pct'])}]{gan_pct}[/{_color_ganancia(pos['ganancia_pct'])}]",
         )
 
     console.print(table)
 
-    if actualizar and total_valor > 0:
-        gan_total = total_valor - total_invertido
-        gan_pct_total = (gan_total / total_invertido) * 100 if total_invertido else 0
+    if actualizar and total_valor_eur > 0:
+        gan_total_eur = round(total_valor_eur - total_invertido_eur, 2)
+        gan_pct_total = (gan_total_eur / total_invertido_eur) * 100 if total_invertido_eur else 0
 
         summary = Table(box=box.SIMPLE, show_header=False)
         summary.add_column("Métrica")
         summary.add_column("Valor", justify="right")
-        summary.add_row("Total Invertido", _formatear_moneda(total_invertido))
-        summary.add_row("Valor Actual", _formatear_moneda(total_valor))
+        summary.add_row("Total Invertido", _formatear_moneda(total_invertido_eur))
+        summary.add_row("Valor Actual", _formatear_moneda(total_valor_eur))
         summary.add_row(
-            "Ganancia/Pérdida",
-            f"[{_color_ganancia(gan_total)}]{_formatear_moneda(gan_total)} ({gan_pct_total:+.2f}%)[/{_color_ganancia(gan_total)}]",
+            "Ganancia/Pérdida Total",
+            f"[{_color_ganancia(gan_total_eur)}]{_formatear_moneda(gan_total_eur)} ({gan_pct_total:+.2f}%)[/{_color_ganancia(gan_total_eur)}]",
         )
         console.print(summary)
 
@@ -199,7 +219,9 @@ def precio(identificador):
     if nav is None:
         console.print(f"[red]No se pudo obtener el NAV de {identificador.upper()}[/red]")
     else:
-        console.print(f"[green]{identificador.upper()}[/green]: {_formatear_moneda(nav)}")
+        tc = obtener_tipo_cambio()
+        nav_eur = convertir_a_eur(nav, tipo_cambio=tc)
+        console.print(f"[green]{identificador.upper()}[/green]: {_formatear_moneda(nav_eur)}")
 
 
 @cli.command()
@@ -211,11 +233,13 @@ def resumen():
         return
 
     total_participaciones = sum(i["total_participaciones"] for i in items)
-    total_invertido = sum(i["total_invertido"] for i in items)
+    total_invertido_usd = sum(i["total_invertido"] for i in items)
+    tipo_cambio = obtener_tipo_cambio()
+    total_invertido_eur = convertir_a_eur(total_invertido_usd) if tipo_cambio else total_invertido_usd
 
     console.print(f"[bold]Posiciones activas:[/bold] {len(items)}")
     console.print(f"[bold]Total participaciones:[/bold] {total_participaciones:.4f}")
-    console.print(f"[bold]Total invertido:[/bold] {_formatear_moneda(total_invertido)}")
+    console.print(f"[bold]Total invertido:[/bold] {_formatear_moneda(total_invertido_eur)}")
 
 
 @cli.command()
@@ -247,6 +271,11 @@ def histograma(identificador, ticker):
     archivo = generar_histograma(df, identificador, nombre)
     if archivo:
         console.print(f"[green]Histograma generado:[/green] {archivo}")
+        try:
+            os.startfile(archivo)
+            console.print("[blue]Abriendo imagen con el visor predeterminado...[/blue]")
+        except Exception:
+            pass
     else:
         console.print("[red]No se pudo generar el histograma.[/red]")
 
