@@ -547,6 +547,150 @@ def generar_histograma_personal(
     return filepath
 
 
+def generar_grafico_pnl_linea(
+    df: pd.DataFrame, participaciones: float, total_invertido: float,
+    identificador: str, nombre: str = ""
+) -> Optional[str]:
+    if df is None or df.empty or len(df) < 5:
+        return None
+    os.makedirs(HIST_DIR, exist_ok=True)
+    precios = df["close"].values
+    fechas = df["fecha"].values
+
+    tc = obtener_tipo_cambio()
+    if tc:
+        precios_eur = precios / tc
+        total_inv_eur = total_invertido / tc
+    else:
+        precios_eur = precios.copy()
+        total_inv_eur = total_invertido
+
+    valor_posicion = participaciones * precios_eur
+    pnl_diario = np.diff(valor_posicion)
+    if len(pnl_diario) < 4:
+        return None
+
+    valor_actual_eur = valor_posicion[-1]
+    ganancia_eur = valor_actual_eur - total_inv_eur
+    ganancia_pct = (ganancia_eur / total_inv_eur) * 100 if total_inv_eur else 0
+    pnl_acumulado = valor_posicion - total_inv_eur
+
+    wins = pnl_diario[pnl_diario > 0]
+    losses = pnl_diario[pnl_diario <= 0]
+    win_rate = (len(wins) / len(pnl_diario)) * 100
+    media = float(np.mean(pnl_diario))
+    mediana = float(np.median(pnl_diario))
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+
+    x_acum = range(len(pnl_acumulado))
+    ax.fill_between(x_acum, pnl_acumulado, 0,
+                    where=(pnl_acumulado >= 0), color="#2e7d32", alpha=0.25, label="Ganancia")
+    ax.fill_between(x_acum, pnl_acumulado, 0,
+                    where=(pnl_acumulado < 0), color="#d32f2f", alpha=0.25, label="Pérdida")
+    ax.plot(x_acum, pnl_acumulado, color="#1565c0", linewidth=1.5)
+    ax.axhline(0, color="black", linewidth=0.8)
+    ax.set_xlabel("Días desde la primera compra", fontsize=11)
+    ax.set_ylabel("P&L Acumulado (EUR)", fontsize=11)
+
+    pnl_final = pnl_acumulado[-1]
+    if pnl_final >= 0:
+        label_final = f"GANANCIA TOTAL: €{pnl_final:+.2f}"
+        color_final = "#2e7d32"
+    else:
+        label_final = f"PÉRDIDA TOTAL: €{pnl_final:+.2f}"
+        color_final = "#d32f2f"
+    ax.set_title(label_final, fontsize=13, fontweight="bold", color=color_final)
+    ax.legend(fontsize=9, loc="upper left")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    fig.suptitle(
+        f"{nombre or identificador}  ·  {participaciones:.4f} participaciones\n"
+        f"Invertido: €{total_inv_eur:,.2f}  ·  "
+        f"Valor actual: €{valor_actual_eur:,.2f}  ·  "
+        f"Resultado: €{ganancia_eur:+.2f} ({ganancia_pct:+.2f}%)",
+        fontsize=11, fontweight="bold", y=0.98
+    )
+
+    plt.tight_layout(rect=[0, 0, 1, 0.92])
+    filename = f"pnl_line_{identificador.replace(':', '_').replace('.', '_')}.png"
+    filepath = os.path.join(HIST_DIR, filename)
+    plt.savefig(filepath, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+    return filepath
+
+
+def generar_grafico_evolucion(
+    df: pd.DataFrame, participaciones: float, total_invertido: float,
+    identificador: str, nombre: str = ""
+) -> Optional[str]:
+    if df is None or df.empty or len(df) < 2:
+        return None
+    os.makedirs(HIST_DIR, exist_ok=True)
+    precios = df["close"].values
+    fechas_dt = df["fecha"].values
+
+    tc = obtener_tipo_cambio()
+    if tc:
+        precios_eur = precios / tc
+        total_inv_eur = total_invertido / tc
+    else:
+        precios_eur = precios
+        total_inv_eur = total_invertido
+
+    valor_posicion = participaciones * precios_eur
+    ganancia_eur = valor_posicion[-1] - total_inv_eur
+    ganancia_pct = (ganancia_eur / total_inv_eur) * 100 if total_inv_eur else 0
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    x = range(len(valor_posicion))
+
+    ax.fill_between(x, total_inv_eur, valor_posicion,
+                    where=(valor_posicion >= total_inv_eur),
+                    color="#2e7d32", alpha=0.15, label="Ganancia")
+    ax.fill_between(x, total_inv_eur, valor_posicion,
+                    where=(valor_posicion < total_inv_eur),
+                    color="#d32f2f", alpha=0.15, label="Pérdida")
+    ax.plot(x, valor_posicion, color="#1565c0", linewidth=2, label="Valor de la inversión")
+    ax.axhline(total_inv_eur, color="#ff8f00", linestyle="--", linewidth=1.5,
+               label=f"Invertido: €{total_inv_eur:,.2f}")
+
+    n = len(x)
+    if n > 0:
+        step = max(1, n // 10)
+        tick_pos = list(range(0, n, step))
+        if tick_pos[-1] != n - 1:
+            tick_pos.append(n - 1)
+        tick_lbl = [str(fechas_dt[i])[:10] for i in tick_pos]
+        ax.set_xticks(tick_pos)
+        ax.set_xticklabels(tick_lbl, rotation=45, ha="right", fontsize=8)
+
+    ax.set_xlabel("Fecha", fontsize=11)
+    ax.set_ylabel("Valor (EUR)", fontsize=11)
+
+    color_name = "green" if ganancia_eur >= 0 else "red"
+    ax.set_title(
+        f"{nombre or identificador}  ·  {participaciones:.4f} participaciones\n"
+        f"Invertido: €{total_inv_eur:,.2f}  ·  "
+        f"Actual: €{valor_posicion[-1]:,.2f}  ·  "
+        f"Resultado: €{ganancia_eur:+.2f} ({ganancia_pct:+.2f}%)",
+        fontsize=12, fontweight="bold", color=color_name
+    )
+
+    ax.legend(fontsize=10, loc="upper left")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.axhline(0, color="black", linewidth=0.5)
+
+    plt.tight_layout()
+    filename = f"evol_{identificador.replace(':', '_').replace('.', '_')}.png"
+    filepath = os.path.join(HIST_DIR, filename)
+    plt.savefig(filepath, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+    return filepath
+
+
 def obtener_portfolio_completo(items: list[dict]) -> list[dict]:
     resultados = [None] * len(items)
 

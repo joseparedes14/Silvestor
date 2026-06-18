@@ -3,3 +3,5 @@ __pycache__/
 *.pyo
 histograms/
 .DS_Store
+*.db-shm
+*.db-wal
