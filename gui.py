@@ -4,19 +4,22 @@ from datetime import datetime
 import threading
 import os
 from PIL import Image
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+import matplotlib.pyplot as plt
 
 from database import (
     init_db, agregar_transaccion, listar_transacciones,
     eliminar_transaccion, obtener_portfolio,
+    obtener_snapshots, obtener_snapshots_asc,
 )
 from fondos import (
     obtener_info_fondo, obtener_precio_actual, obtener_precio_historico_en_fecha,
     obtener_datos_historicos,
-    generar_grafico_pnl_linea,
     obtener_tipo_cambio, convertir_a_eur
 )
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from database import obtener_resumen_isin
+from snapshot import tomar_snapshot
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("green")
@@ -63,15 +66,15 @@ class App(ctk.CTk):
 
         self.tab_agregar = self.tabview.add("Agregar")
         self.tab_inversiones = self.tabview.add("Inversiones")
-        self.tab_rendimiento = self.tabview.add("Rendimiento")
+        self.tab_historial = self.tabview.add("Historial")
 
         self._build_tab_agregar()
         self._build_tab_inversiones()
-        self._build_tab_rendimiento()
+        self._build_tab_historial()
 
     def _on_tab_change(self, tab_name):
-        if tab_name == "Rendimiento":
-            self._cargar_lista_rendimientos()
+        if tab_name == "Historial":
+            self._cargar_snapshots_gui()
 
     def _build_statusbar(self):
         self.statusbar = ctk.CTkLabel(self, text="Listo", anchor="w", font=("Segoe UI", 11))
@@ -508,139 +511,184 @@ class App(ctk.CTk):
             self.detalle_img.configure(text="No hay suficientes datos\npara generar el gráfico", font=("Segoe UI", 12))
         self.detalle_frame.grid()
 
-    def _build_tab_rendimiento(self):
-        self.tab_rendimiento.grid_rowconfigure(0, weight=0)
-        self.tab_rendimiento.grid_rowconfigure(1, weight=1)
-        self.tab_rendimiento.grid_columnconfigure(0, weight=1)
 
-        cols = ("isin", "nombre", "part", "invertido", "valor_actual", "ganancia")
-        self.tree_rendimiento = ttk.Treeview(self.tab_rendimiento, columns=cols, show="headings", height=8)
+
+
+    def _build_tab_historial(self):
+        self.tab_historial.grid_rowconfigure(1, weight=0)
+        self.tab_historial.grid_rowconfigure(2, weight=1)
+        self.tab_historial.grid_columnconfigure(0, weight=1)
+
+        btn_frame = ctk.CTkFrame(self.tab_historial, fg_color="transparent")
+        btn_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 5))
+        self.btn_tomar_snapshot = ctk.CTkButton(
+            btn_frame, text="Tomar Snapshot Ahora",
+            command=self._tomar_snapshot_gui
+        )
+        self.btn_tomar_snapshot.pack(side="left", padx=5)
+        self.lbl_snap_status = ctk.CTkLabel(btn_frame, text="", font=("Segoe UI", 12))
+        self.lbl_snap_status.pack(side="left", padx=10)
+
+        frame = ctk.CTkFrame(self.tab_historial)
+        frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=5)
+        frame.grid_rowconfigure(0, weight=1)
+        frame.grid_columnconfigure(0, weight=1)
+
+        cols = ("fecha", "invertido", "valor", "daily_pnl", "cum_pnl")
+        self.tree_snapshots = ttk.Treeview(frame, columns=cols, show="headings", height=6)
         headings = [
-            ("isin", "ISIN", 130),
-            ("nombre", "Nombre", 220),
-            ("part", "Participaciones", 110),
-            ("invertido", "Total Invertido", 130),
-            ("valor_actual", "Valor Actual", 130),
-            ("ganancia", "Ganancia/Pérdida", 160),
+            ("fecha", "Fecha", 110),
+            ("invertido", "Invertido", 120),
+            ("valor", "Valor Actual", 120),
+            ("daily_pnl", "P&L Diario", 120),
+            ("cum_pnl", "P&L Acumulado", 140),
         ]
         for col, text, width in headings:
-            self.tree_rendimiento.heading(col, text=text)
-            self.tree_rendimiento.column(col, width=width, anchor="center" if col != "nombre" else "w")
+            self.tree_snapshots.heading(col, text=text)
+            self.tree_snapshots.column(col, width=width, anchor="center")
 
-        vsb = ttk.Scrollbar(self.tab_rendimiento, orient="vertical", command=self.tree_rendimiento.yview)
-        self.tree_rendimiento.configure(yscrollcommand=vsb.set)
-        self.tree_rendimiento.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 2))
-        vsb.grid(row=0, column=0, sticky="nse", padx=(0, 10), pady=(10, 2))
+        vsb = ttk.Scrollbar(frame, orient="vertical", command=self.tree_snapshots.yview)
+        self.tree_snapshots.configure(yscrollcommand=vsb.set)
+        self.tree_snapshots.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
 
-        self.lbl_rend_img = ctk.CTkLabel(
-            self.tab_rendimiento, text="Haz doble clic en una inversión\npara ver su evolución",
-            anchor="center", font=("Segoe UI", 13), fg_color="#1a1a1a"
+        self.snap_canvas_frame = ctk.CTkFrame(self.tab_historial, fg_color="#1a1a1a")
+        self.snap_canvas_frame.grid(row=2, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        self.snap_canvas_frame.grid_rowconfigure(0, weight=1)
+        self.snap_canvas_frame.grid_columnconfigure(0, weight=1)
+
+        self.snap_canvas = None
+        self.snap_toolbar = None
+        self.snap_no_data_label = ctk.CTkLabel(
+            self.snap_canvas_frame,
+            text="Toma un snapshot para comenzar\nel historial de evolución",
+            anchor="center", font=("Segoe UI", 13)
         )
-        self.lbl_rend_img.grid(row=1, column=0, sticky="nsew", padx=10, pady=(2, 10))
+        self.snap_no_data_label.grid(row=0, column=0, sticky="nsew")
 
-        self.tree_rendimiento.bind("<Double-1>", self._on_rendimiento_doble_click)
-        self._cargar_lista_rendimientos()
+        self.after(200, self._cargar_snapshots_gui)
 
-    def _cargar_lista_rendimientos(self):
-        for row in self.tree_rendimiento.get_children():
-            self.tree_rendimiento.delete(row)
-        portfolio = obtener_portfolio()
-        if not portfolio:
-            self.lbl_rend_img.configure(text="No hay transacciones.\nAgrega una desde la pestaña 'Agregar'.")
+    def _tomar_snapshot_gui(self):
+        self.btn_tomar_snapshot.configure(state="disabled", text="Calculando...")
+        self.lbl_snap_status.configure(text="Obteniendo precios...")
+        threading.Thread(target=self._task_tomar_snapshot, daemon=True).start()
+
+    def _task_tomar_snapshot(self):
+        try:
+            resultado = tomar_snapshot()
+            dpnl_str = f"{resultado['daily_pnl']:+.2f}" if resultado['daily_pnl'] is not None else "N/A"
+            msg = (f"Snapshot {resultado['fecha']}: "
+                   f"EUR {resultado['total_valor']:,.2f} | "
+                   f"P&L diario: EUR {dpnl_str} | "
+                   f"P&L acum.: EUR {resultado['cumulative_pnl']:+,.2f}")
+            self.after(0, lambda: self._completar_snapshot_gui(msg))
+        except Exception as e:
+            self.after(0, lambda: self._completar_snapshot_gui(f"Error: {e}", error=True))
+
+    def _completar_snapshot_gui(self, msg, error=False):
+        self.btn_tomar_snapshot.configure(state="normal", text="Tomar Snapshot Ahora")
+        color = "red" if error else "green"
+        self.lbl_snap_status.configure(text=msg, text_color=color)
+        self._cargar_snapshots_gui()
+
+    def _limpiar_canvas_snapshots(self):
+        if self.snap_canvas:
+            self.snap_canvas.get_tk_widget().destroy()
+            self.snap_canvas = None
+        if self.snap_toolbar:
+            self.snap_toolbar.destroy()
+            self.snap_toolbar = None
+        self.snap_no_data_label.grid()
+
+    def _cargar_snapshots_gui(self):
+        snapshots = obtener_snapshots_asc()
+        for row in self.tree_snapshots.get_children():
+            self.tree_snapshots.delete(row)
+
+        if not snapshots:
+            self._limpiar_canvas_snapshots()
+            self.snap_no_data_label.configure(
+                text="Toma un snapshot para comenzar\nel historial de evolución"
+            )
             return
-        self.lbl_rend_img.configure(text="Cargando valores actuales...")
-        threading.Thread(target=self._fetch_rendimientos, args=(portfolio,), daemon=True).start()
 
-    def _fetch_rendimientos(self, portfolio):
-        isins = [p["isin"] for p in portfolio]
-        nav_cache = {}
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            futuros = {executor.submit(obtener_precio_actual, isin): isin for isin in isins}
-            for futuro in as_completed(futuros):
-                isin = futuros[futuro]
-                try:
-                    nav_cache[isin] = futuro.result()
-                except Exception:
-                    nav_cache[isin] = None
-        tc = self._obtener_tc()
+        for s in snapshots:
+            dpnl = f"EUR {s['daily_pnl']:+.2f}" if s['daily_pnl'] is not None else "---"
+            self.tree_snapshots.insert("", "end", values=(
+                s["fecha"],
+                f"EUR {s['total_invertido']:,.2f}",
+                f"EUR {s['total_valor']:,.2f}",
+                dpnl,
+                f"EUR {s['cumulative_pnl']:+,.2f}",
+            ))
 
-        def form(valor, moneda="USD"):
-            if valor is None:
-                return "---"
-            eur = convertir_a_eur(valor, moneda, tc)
-            return f"€{eur:,.2f}" if eur else f"${valor:,.2f}"
+        self._generar_grafico_snapshots(snapshots)
 
-        rows = []
-        for p in portfolio:
-            isin = p["isin"]
-            nombre = p["nombre"][:40]
-            part = p["total_participaciones"]
-            inv = p["total_invertido"]
-            moneda = p.get("moneda", "USD")
-            nav = nav_cache.get(isin)
-            val_act = round(part * nav, 2) if nav and part else None
-            if val_act and inv:
-                gan = round(val_act - inv, 2)
-                gan_pct = round((gan / inv) * 100, 2) if inv else 0
-                gan_str = f"{form(gan, moneda)} ({gan_pct:+.2f}%)"
-            else:
-                gan_str = "---"
-            rows.append((isin, nombre, f"{part:.4f}", form(inv, moneda), form(val_act, moneda) if val_act else "---", gan_str))
-
-        self.after(0, self._mostrar_lista_rendimientos, rows)
-
-    def _mostrar_lista_rendimientos(self, rows):
-        for row in self.tree_rendimiento.get_children():
-            self.tree_rendimiento.delete(row)
-        for vals in rows:
-            self.tree_rendimiento.insert("", "end", values=vals)
-        self.lbl_rend_img.configure(text="Haz doble clic en una inversión\npara ver su evolución")
-
-    def _on_rendimiento_doble_click(self, event):
-        sel = self.tree_rendimiento.selection()
-        if not sel:
+    def _generar_grafico_snapshots(self, snapshots):
+        if len(snapshots) < 2:
+            self._limpiar_canvas_snapshots()
+            self.snap_no_data_label.configure(
+                text="Se necesitan al menos 2 snapshots\npara generar el gráfico de evolución"
+            )
             return
-        item = self.tree_rendimiento.item(sel[0])
-        vals = item["values"]
-        isin = vals[0]
-        self.lbl_rend_img.configure(text="Cargando gráfico...")
-        threading.Thread(target=self._cargar_grafico_rend, args=(isin,), daemon=True).start()
 
-    def _cargar_grafico_rend(self, isin):
-        if isin in self._info_fondo_cache:
-            info = self._info_fondo_cache[isin]
-        else:
-            info = obtener_info_fondo(isin)
-            self._info_fondo_cache[isin] = info
+        fechas = [s["fecha"] for s in snapshots]
+        valores = [s["total_valor"] for s in snapshots]
+        invertidos = [s["total_invertido"] for s in snapshots]
+        pnls = [s["cumulative_pnl"] for s in snapshots]
 
-        nombre = info.get("nombre", isin)
-        df = obtener_datos_historicos(isin)
-        if df is None or df.empty or len(df) < 5:
-            self.after(0, lambda: self.lbl_rend_img.configure(
-                text="No hay suficientes datos históricos\npara generar el gráfico"))
-            return
-        resumen = obtener_resumen_isin(isin)
-        if not resumen:
-            self.after(0, lambda: self.lbl_rend_img.configure(text="No hay transacciones para este ISIN."))
-            return
-        pos = resumen[0]
-        participaciones = pos["total_participaciones"]
-        total_invertido = pos["total_invertido"]
-        archivo = generar_grafico_pnl_linea(df, participaciones, total_invertido, isin, nombre)
-        self.after(0, self._mostrar_grafico_rend, archivo, isin)
+        self._limpiar_canvas_snapshots()
 
-    def _mostrar_grafico_rend(self, archivo, isin):
-        if archivo and os.path.exists(archivo):
-            try:
-                pil_img = Image.open(archivo)
-                ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(700, 350))
-                self.lbl_rend_img.configure(image=ctk_img, text="")
-                self.lbl_rend_img.image = ctk_img
-                self.set_status(f"Gráfico P&L generado para {isin}.")
-            except Exception as e:
-                self.lbl_rend_img.configure(text=f"Error al mostrar imagen: {e}")
-        else:
-            self.lbl_rend_img.configure(text="No se pudo generar el gráfico\n(datos insuficientes)")
+        fig, (ax1, ax2) = plt.subplots(2, 1, gridspec_kw={"height_ratios": [2, 1]})
+        fig.patch.set_facecolor('#1a1a1a')
+        fig.set_size_inches(9, 5, forward=True)
+
+        x = range(len(fechas))
+        tick_step = max(1, len(fechas) // 12)
+        tick_pos = list(range(0, len(fechas), tick_step))
+        if tick_pos[-1] != len(fechas) - 1:
+            tick_pos.append(len(fechas) - 1)
+        tick_lbl = [fechas[i] for i in tick_pos]
+
+        for ax in (ax1, ax2):
+            ax.set_facecolor('#1a1a1a')
+            ax.spines['bottom'].set_color('#555555')
+            ax.spines['left'].set_color('#555555')
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            ax.tick_params(colors='#cccccc', labelsize=8)
+            ax.set_xticks(tick_pos)
+            ax.set_xticklabels(tick_lbl, rotation=45, ha="right", fontsize=7)
+
+        ax1.fill_between(x, invertidos, valores,
+                         where=(valores >= invertidos), color="#2e7d32", alpha=0.2)
+        ax1.fill_between(x, invertidos, valores,
+                         where=(valores < invertidos), color="#d32f2f", alpha=0.2)
+        ax1.plot(x, valores, color="#4caf50", linewidth=2, label="Valor actual")
+        ax1.plot(x, invertidos, color="#ff8f00", linestyle="--", linewidth=1.5, label="Invertido")
+        ax1.set_ylabel("EUR", fontsize=10, color="#cccccc")
+        ax1.set_title("Evolución del Portafolio", fontsize=12, fontweight="bold", color="#ffffff")
+        ax1.legend(fontsize=9, loc="upper left", labelcolor="#cccccc")
+
+        ax2.fill_between(x, pnls, 0,
+                         where=(pnls >= 0), color="#2e7d32", alpha=0.3, label="Ganancia")
+        ax2.fill_between(x, pnls, 0,
+                         where=(pnls < 0), color="#d32f2f", alpha=0.3, label="Pérdida")
+        ax2.plot(x, pnls, color="#4caf50", linewidth=1.5)
+        ax2.axhline(0, color="#888888", linewidth=0.8)
+        ax2.set_ylabel("EUR", fontsize=10, color="#cccccc")
+        ax2.set_title("P&L Acumulado", fontsize=12, fontweight="bold", color="#ffffff")
+        ax2.legend(fontsize=9, loc="upper left", labelcolor="#cccccc")
+
+        plt.tight_layout()
+
+        self.snap_canvas = FigureCanvasTkAgg(fig, master=self.snap_canvas_frame)
+        self.snap_canvas.draw()
+        self.snap_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+
+        self.snap_toolbar = NavigationToolbar2Tk(self.snap_canvas, self.snap_canvas_frame)
+        self.snap_toolbar.update()
+        self.snap_toolbar.grid(row=1, column=0, sticky="ew")
 
 
 if __name__ == "__main__":

@@ -5,12 +5,16 @@ from rich.console import Console
 from rich.table import Table
 from rich import box
 
-from database import init_db, agregar_transaccion, listar_transacciones, eliminar_transaccion, obtener_portfolio
+from database import (
+    init_db, agregar_transaccion, listar_transacciones, eliminar_transaccion,
+    obtener_portfolio, obtener_snapshots,
+)
 from fondos import (
     obtener_info_fondo, obtener_precio_actual, obtener_portfolio_completo,
     obtener_datos_historicos, generar_histograma, generar_reporte_rendimiento, calcular_rendimientos,
     obtener_tipo_cambio, convertir_a_eur, limpiar_cache_tipo_cambio
 )
+from snapshot import tomar_snapshot
 
 console = Console()
 
@@ -254,6 +258,48 @@ def rendimiento(identificador, ticker):
         return
     reporte = generar_reporte_rendimiento(df)
     console.print(reporte)
+
+
+@cli.command()
+@click.option("--fecha", "-f", default=None, help="Fecha (YYYY-MM-DD). Por defecto: hoy")
+def snapshot(fecha):
+    """Tomar un snapshot diario del valor del portafolio."""
+    with console.status("[bold green]Calculando valor del portafolio..."):
+        resultado = tomar_snapshot(fecha)
+    dpnl_str = f"{resultado['daily_pnl']:+.2f}" if resultado['daily_pnl'] is not None else "N/A"
+    console.print(f"[green]Snapshot {resultado['fecha']}[/green]")
+    console.print(f"  Invertido:    [cyan]EUR {resultado['total_invertido']:,.2f}[/cyan]")
+    console.print(f"  Valor actual: [cyan]EUR {resultado['total_valor']:,.2f}[/cyan]")
+    pnl_color = _color_ganancia(resultado['cumulative_pnl'])
+    console.print(f"  P&L Diario:   EUR {dpnl_str}")
+    cum_str = f"EUR {resultado['cumulative_pnl']:+,.2f}"
+    console.print(f"  P&L Acum.:    [{pnl_color}]{cum_str}[/{pnl_color}]")
+
+
+@cli.command()
+@click.option("--limite", "-l", type=int, default=None, help="Numero de snapshots a mostrar")
+def snapshot_history(limite):
+    """Ver historial de snapshots diarios."""
+    snapshots = obtener_snapshots(limite)
+    if not snapshots:
+        console.print("[yellow]No hay snapshots registrados. Usa 'snapshot' para tomar uno.[/yellow]")
+        return
+    table = Table(box=box.SIMPLE, title="Historial de Snapshots Diarios (EUR)")
+    table.add_column("Fecha", style="cyan")
+    table.add_column("Invertido", justify="right")
+    table.add_column("Valor", justify="right")
+    table.add_column("P&L Diario", justify="right")
+    table.add_column("P&L Acum.", justify="right")
+    for s in snapshots:
+        dpnl = f"{s['daily_pnl']:+.2f}" if s['daily_pnl'] is not None else "---"
+        table.add_row(
+            s["fecha"],
+            _formatear_moneda(s["total_invertido"]),
+            _formatear_moneda(s["total_valor"]),
+            f"[{_color_ganancia(s['daily_pnl'])}]{dpnl}[/{_color_ganancia(s['daily_pnl'])}]",
+            f"[{_color_ganancia(s['cumulative_pnl'])}]{_formatear_moneda(s['cumulative_pnl'])}[/{_color_ganancia(s['cumulative_pnl'])}]",
+        )
+    console.print(table)
 
 
 @cli.command()

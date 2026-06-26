@@ -37,6 +37,21 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_transacciones_isin
             ON transacciones(isin)
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS daily_snapshots (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                fecha           TEXT NOT NULL UNIQUE,
+                total_invertido REAL NOT NULL,
+                total_valor     REAL NOT NULL,
+                daily_pnl       REAL,
+                cumulative_pnl  REAL NOT NULL,
+                created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_snapshots_fecha
+            ON daily_snapshots(fecha)
+        """)
 
 
 def agregar_transaccion(
@@ -125,4 +140,46 @@ def obtener_resumen_isin(isin: str):
             WHERE isin = ?
             GROUP BY isin
         """, (isin.upper(),)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def guardar_snapshot(fecha: str, total_invertido: float, total_valor: float,
+                     daily_pnl: float = None, cumulative_pnl: float = None) -> int:
+    if cumulative_pnl is None:
+        cumulative_pnl = round(total_valor - total_invertido, 2)
+    with get_connection() as conn:
+        cursor = conn.execute("""
+            INSERT INTO daily_snapshots (fecha, total_invertido, total_valor, daily_pnl, cumulative_pnl)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(fecha) DO UPDATE SET
+                total_invertido = excluded.total_invertido,
+                total_valor = excluded.total_valor,
+                daily_pnl = excluded.daily_pnl,
+                cumulative_pnl = excluded.cumulative_pnl
+        """, (fecha, total_invertido, total_valor, daily_pnl, cumulative_pnl))
+        return cursor.lastrowid
+
+
+def obtener_ultimo_snapshot() -> dict:
+    with get_connection() as conn:
+        row = conn.execute("""
+            SELECT * FROM daily_snapshots ORDER BY fecha DESC LIMIT 1
+        """).fetchone()
+    return dict(row) if row else None
+
+
+def obtener_snapshots(limite: int = None) -> list[dict]:
+    with get_connection() as conn:
+        query = "SELECT * FROM daily_snapshots ORDER BY fecha DESC"
+        if limite:
+            query += f" LIMIT {limite}"
+        rows = conn.execute(query).fetchall()
+    return [dict(r) for r in rows]
+
+
+def obtener_snapshots_asc() -> list[dict]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM daily_snapshots ORDER BY fecha ASC"
+        ).fetchall()
     return [dict(r) for r in rows]

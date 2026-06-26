@@ -171,6 +171,46 @@ def _extraer_datos_tabla(soup: BeautifulSoup) -> Optional[pd.DataFrame]:
     return df
 
 
+def _extraer_xid(soup: BeautifulSoup) -> Optional[str]:
+    hist_div = soup.select_one('[data-f2-app-id="mod-tearsheet-historical-prices"]')
+    if not hist_div:
+        return None
+    hp_app = hist_div.select_one('[data-module-name="HistoricalPricesApp"]')
+    if not hp_app:
+        return None
+    config_str = hp_app.get("data-mod-config")
+    if not config_str:
+        return None
+    config_str = config_str.replace("&quot;", '"').replace("&amp;", "&")
+    try:
+        return json.loads(config_str).get("symbol")
+    except Exception:
+        return None
+
+
+def _extraer_datos_tabla_ajax(soup: BeautifulSoup) -> Optional[pd.DataFrame]:
+    rows = soup.select("tr")
+    data = []
+    for row in rows:
+        cols = row.select("td")
+        if len(cols) >= 5:
+            span = cols[0].select_one("span.mod-ui-hide-small-below")
+            fecha_texto = span.get_text(strip=True) if span else cols[0].get_text(strip=True)
+            from dateutil import parser as dtparser
+            try:
+                fecha = dtparser.parse(fecha_texto)
+            except Exception:
+                continue
+            try:
+                close = float(cols[4].get_text(strip=True))
+                data.append({"fecha": fecha, "close": close})
+            except ValueError:
+                continue
+    if not data:
+        return None
+    return pd.DataFrame(data).sort_values("fecha").reset_index(drop=True)
+
+
 def _obtener_datos_mensuales(ticker: str) -> Optional[pd.DataFrame]:
     try:
         resp = requests.get(
@@ -196,6 +236,22 @@ def _obtener_datos_mensuales(ticker: str) -> Optional[pd.DataFrame]:
                 df = pd.DataFrame(records)
                 return df.sort_values("fecha").reset_index(drop=True)
         return None
+    except Exception:
+        return None
+
+
+def _obtener_datos_historicos_ajax(xid: str, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
+    url = "https://markets.ft.com/data/equities/ajax/get-historical-prices"
+    params = {"startDate": start_date, "endDate": end_date, "symbol": xid}
+    try:
+        resp = requests.get(url, params=params, headers=_AJAX_HEADERS, timeout=15)
+        if resp.status_code != 200:
+            return None
+        html = resp.json().get("html", "")
+        if not html:
+            return None
+        soup = BeautifulSoup(f"<table>{html}</table>", "html.parser")
+        return _extraer_datos_tabla_ajax(soup)
     except Exception:
         return None
 
@@ -311,16 +367,36 @@ def obtener_precio_historico_en_fecha(
     identificador: str, fecha: str, ticker: Optional[str] = None
 ) -> Optional[float]:
     t = _resolver_ticker(identificador, ticker)
-    # Try daily data first (last ~1 month)
-    df_diario = obtener_datos_historicos(identificador, ticker)
-    nav = _buscar_nav_en_df(df_diario, fecha) if df_diario is not None else None
-    if nav is not None:
-        return nav
-    # Fall back to monthly growth data (5 years)
+    xid = None
+    df_diario = None
+    url = f"{FT_BASE}/historical?s={t}"
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        if resp.status_code == 200:
+            soup = BeautifulSoup(resp.text, "html.parser")
+            xid = _extraer_xid(soup)
+            df_diario = _extraer_datos_tabla(soup)
+    except Exception:
+        pass
+    # 1. Try Ajax with custom date range around target date
+    if xid:
+        target = pd.Timestamp(fecha)
+        start = (target - timedelta(days=60)).strftime("%Y/%m/%d")
+        end = min(target + timedelta(days=7), pd.Timestamp.now()).strftime("%Y/%m/%d")
+        df_ajax = _obtener_datos_historicos_ajax(xid, start, end)
+        if df_ajax is not None and not df_ajax.empty:
+            nav = _buscar_nav_en_df(df_ajax, fecha)
+            if nav is not None:
+                return nav
+    # 2. Fallback to default daily table from HTML
+    if df_diario is not None:
+        nav = _buscar_nav_en_df(df_diario, fecha)
+        if nav is not None:
+            return nav
+    # 3. Fallback to monthly growth data
     df_mensual = _obtener_datos_mensuales(t)
     if df_mensual is None or df_mensual.empty:
-        return nav
-    # Convert growth values to NAV using current NAV as reference
+        return None
     nav_actual = obtener_precio_actual(identificador, ticker)
     if nav_actual is None or not df_mensual["growth"].notna().any():
         return _buscar_nav_en_df(df_mensual, fecha, "growth")
@@ -328,8 +404,7 @@ def obtener_precio_historico_en_fecha(
     if ultimo_growth <= 0:
         return None
     df_mensual["nav"] = df_mensual["growth"] * (nav_actual / ultimo_growth)
-    nav = _buscar_nav_en_df(df_mensual, fecha, "nav")
-    return nav
+    return _buscar_nav_en_df(df_mensual, fecha, "nav")
 
 
 def calcular_rendimientos(df: pd.DataFrame) -> dict:
