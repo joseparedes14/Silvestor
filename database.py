@@ -93,6 +93,25 @@ def listar_transacciones(isin: Optional[str] = None):
     return [dict(r) for r in rows]
 
 
+def actualizar_transaccion(
+    transaccion_id: int,
+    fecha: str,
+    tipo: str,
+    participaciones: float,
+    precio: float,
+    total: float,
+    moneda: str = "USD",
+) -> bool:
+    with get_connection() as conn:
+        cursor = conn.execute(
+            """UPDATE transacciones
+               SET fecha=?, tipo=?, participaciones=?, precio=?, total=?, moneda=?
+               WHERE id=?""",
+            (fecha, tipo, participaciones, precio, total, moneda, transaccion_id),
+        )
+        return cursor.rowcount > 0
+
+
 def eliminar_transaccion(transaccion_id: int) -> bool:
     with get_connection() as conn:
         cursor = conn.execute(

@@ -8,8 +8,8 @@ import matplotlib.pyplot as plt
 
 from database import (
     init_db, agregar_transaccion, listar_transacciones,
-    eliminar_transaccion, eliminar_snapshot, obtener_portfolio,
-    obtener_snapshots, obtener_snapshots_asc,
+    eliminar_transaccion, eliminar_snapshot, actualizar_transaccion,
+    obtener_portfolio, obtener_snapshots, obtener_snapshots_asc,
 )
 from fondos import (
     obtener_info_fondo, obtener_precio_actual, obtener_precio_historico_en_fecha,
@@ -312,6 +312,8 @@ class App(ctk.CTk):
         self.tree_inversiones.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
 
+        self.tree_inversiones.bind("<Double-1>", self._editar_transaccion)
+
         btn_frame = ctk.CTkFrame(self.tab_inversiones, fg_color="transparent")
         btn_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 5))
         ctk.CTkButton(btn_frame, text="Actualizar NAVs", command=self._refrescar_inversiones_background).pack(side="left", padx=5)
@@ -429,6 +431,110 @@ class App(ctk.CTk):
             self._refrescar_inversiones_background()
 
 
+
+    def _editar_transaccion(self, event):
+        sel = self.tree_inversiones.selection()
+        if not sel:
+            return
+        item = self.tree_inversiones.item(sel[0])
+        trans_id = item["values"][0]
+
+        transacciones = listar_transacciones()
+        t = next((t for t in transacciones if t["id"] == trans_id), None)
+        if not t:
+            return
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title(f"Editar Transacción #{trans_id}")
+        dialog.geometry("420x350")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.grab_set()
+
+        frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        frame.pack(fill="both", expand=True, padx=15, pady=15)
+
+        campos = [
+            ("ID", f"#{trans_id}"),
+            ("ISIN", t["isin"]),
+            ("Nombre", t["nombre"][:50]),
+        ]
+        for i, (label, val) in enumerate(campos):
+            ctk.CTkLabel(frame, text=label, font=("Segoe UI", 12, "bold")).grid(row=i, column=0, sticky="w", pady=2)
+            ctk.CTkLabel(frame, text=val, font=("Consolas", 12), text_color="lightblue").grid(row=i, column=1, sticky="w", pady=2)
+
+        row = len(campos)
+        ctk.CTkLabel(frame, text="Fecha", font=("Segoe UI", 12, "bold")).grid(row=row, column=0, sticky="w", pady=2)
+        fecha_entry = ctk.CTkEntry(frame, placeholder_text="YYYY-MM-DD")
+        fecha_entry.insert(0, t["fecha"])
+        fecha_entry.grid(row=row, column=1, sticky="ew", pady=2)
+
+        row += 1
+        ctk.CTkLabel(frame, text="Tipo", font=("Segoe UI", 12, "bold")).grid(row=row, column=0, sticky="w", pady=2)
+        tipo_combo = ctk.CTkComboBox(frame, values=["compra", "venta"], state="readonly")
+        tipo_combo.set(t["tipo"])
+        tipo_combo.grid(row=row, column=1, sticky="ew", pady=2)
+
+        row += 1
+        ctk.CTkLabel(frame, text="Participaciones", font=("Segoe UI", 12, "bold")).grid(row=row, column=0, sticky="w", pady=2)
+        part_entry = ctk.CTkEntry(frame)
+        part_entry.insert(0, str(t["participaciones"]))
+        part_entry.grid(row=row, column=1, sticky="ew", pady=2)
+
+        row += 1
+        ctk.CTkLabel(frame, text="Precio (NAV)", font=("Segoe UI", 12, "bold")).grid(row=row, column=0, sticky="w", pady=2)
+        precio_entry = ctk.CTkEntry(frame)
+        precio_entry.insert(0, str(t["precio"]))
+        precio_entry.grid(row=row, column=1, sticky="ew", pady=2)
+
+        row += 1
+        ctk.CTkLabel(frame, text="Moneda", font=("Segoe UI", 12, "bold")).grid(row=row, column=0, sticky="w", pady=2)
+        moneda_entry = ctk.CTkEntry(frame)
+        moneda_entry.insert(0, t.get("moneda", "USD"))
+        moneda_entry.grid(row=row, column=1, sticky="ew", pady=2)
+
+        row += 1
+        btn_frame = ctk.CTkFrame(frame, fg_color="transparent")
+        btn_frame.grid(row=row, column=0, columnspan=2, pady=(12, 0))
+        ctk.CTkButton(btn_frame, text="Guardar", command=lambda: self._guardar_edicion(
+            dialog, trans_id, fecha_entry, tipo_combo, part_entry, precio_entry, moneda_entry
+        )).pack(side="left", padx=5)
+        ctk.CTkButton(btn_frame, text="Cancelar", command=dialog.destroy, fg_color="#555555",
+                      hover_color="#777777").pack(side="left", padx=5)
+
+        frame.grid_columnconfigure(1, weight=1)
+
+    def _guardar_edicion(self, dialog, trans_id, fecha_entry, tipo_combo, part_entry, precio_entry, moneda_entry):
+        try:
+            fecha = fecha_entry.get().strip()
+            datetime.strptime(fecha, "%Y-%m-%d")
+        except (ValueError, AttributeError):
+            messagebox.showwarning("Error", "Fecha inválida. Usa YYYY-MM-DD.", parent=dialog)
+            return
+        tipo = tipo_combo.get()
+        try:
+            participaciones = float(part_entry.get().strip())
+            precio = float(precio_entry.get().strip())
+            if participaciones <= 0 or precio <= 0:
+                raise ValueError
+        except (ValueError, AttributeError):
+            messagebox.showwarning("Error", "Participaciones y precio deben ser números positivos.", parent=dialog)
+            return
+        moneda = moneda_entry.get().strip().upper()
+        if moneda not in ("USD", "EUR", "GBP", "CHF", "JPY", "CAD", "AUD", "SEK", "NOK", "DKK", "PLN", "HKD", "SGD"):
+            messagebox.showwarning("Error", f"Moneda no reconocida: {moneda}", parent=dialog)
+            return
+
+        total = round(participaciones * precio, 2)
+
+        ok = actualizar_transaccion(trans_id, fecha, tipo, participaciones, precio, total, moneda)
+        if ok:
+            dialog.destroy()
+            self.set_status(f"Transacción #{trans_id} actualizada.")
+            self._cargar_inversiones_inicial()
+            self._refrescar_inversiones_background()
+        else:
+            messagebox.showerror("Error", "No se pudo actualizar la transacción.", parent=dialog)
 
     def _build_tab_historial(self):
         self.tab_historial.grid_rowconfigure(1, weight=0)

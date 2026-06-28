@@ -12,6 +12,7 @@
 
 ### Añadido
 - **Eliminar snapshots**: Nuevo botón "Eliminar Snapshot" en la pestaña "Historial" que permite borrar un snapshot seleccionado de la tabla. También se añadió la función `eliminar_snapshot()` en `database.py`.
+- **Editar transacciones**: Doble clic sobre cualquier transacción en la pestaña "Inversiones" abre un diálogo de edición donde se pueden modificar fecha, tipo, participaciones, precio (NAV) y moneda. El total se recalcula automáticamente.
 
 ### Cambiado
 - **Detección de moneda mejorada**: Ahora `_extraer_moneda()` analiza tanto la tabla de perfil de FT como el nombre del fondo. Si el nombre contiene un código de moneda conocido (EUR, USD, GBP, etc.), este tiene prioridad sobre el valor extraído de la tabla de FT, ya que el nombre es más fiable. Corregido el caso del ISIN IE00B03HCZ61 cuyo precio está en EUR pero FT reportaba "Price currency: GBP".
