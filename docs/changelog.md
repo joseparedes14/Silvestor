@@ -1,5 +1,32 @@
 # Changelog - Inversiones ETF
 
+## [1.3.0] - 2026-06-28
+
+### Eliminado
+- **Detalle de inversión**: Eliminado el panel de detalle con gráfico de evolución que se mostraba al seleccionar una transacción en la pestaña "Inversiones". Ahora la selección de una fila solo la resalta visualmente, sin abrir información adicional.
+
+### Cambiado
+- **Snapshots con timestamp**: La tabla `daily_snapshots` ya no tiene restricción UNIQUE en `fecha`, permitiendo múltiples snapshots en un mismo día. El campo `fecha` ahora almacena la fecha y hora (`YYYY-MM-DD HH:MM:SS`) para distinguir snapshots dentro del mismo día.
+- **Migración automática**: Los snapshots existentes con solo fecha se convierten automáticamente al nuevo formato añadiendo `00:00:00`.
+- **CLI y GUI**: Ajustados los formatos de visualización para mostrar correctamente los timestamps en las tablas y gráficos.
+
+### Corregido
+- **Gráfico interactivo de snapshots**: Se reescribió la generación del gráfico de la pestaña "Historial" para que funcione correctamente. Se corrigieron los siguientes problemas:
+  - El `no_data_label` ahora se oculta adecuadamente al mostrar el gráfico (usando `grid_remove` en lugar de dejarlo superpuesto).
+  - Se añadió `try/except` con mensaje de error visible si la generación del gráfico falla.
+  - Se corrigió la comparación de `fill_between` que usaba comparación lexicográfica de listas en lugar de comparación elemento a elemento.
+  - Se añadieron marcadores (`marker="o"`) en las líneas para visualizar puntos individuales de cada snapshot.
+  - Se movió `set_xticks`/`set_xticklabels` a cada eje individualmente.
+
+---
+
+## [1.2.1] - 2026-06-26
+
+### Añadido
+- **AGENTS.md**: Archivo de instrucciones para el agente que exige registrar todos los cambios en `docs/changelog.md`.
+
+---
+
 ## [1.2.0] - 2026-06-26
 
 ### Cambiado

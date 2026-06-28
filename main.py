@@ -261,9 +261,9 @@ def rendimiento(identificador, ticker):
 
 
 @cli.command()
-@click.option("--fecha", "-f", default=None, help="Fecha (YYYY-MM-DD). Por defecto: hoy")
+@click.option("--fecha", "-f", default=None, help="Fecha (YYYY-MM-DD hh:mm:ss). Por defecto: ahora")
 def snapshot(fecha):
-    """Tomar un snapshot diario del valor del portafolio."""
+    """Tomar un snapshot del valor del portafolio."""
     with console.status("[bold green]Calculando valor del portafolio..."):
         resultado = tomar_snapshot(fecha)
     dpnl_str = f"{resultado['daily_pnl']:+.2f}" if resultado['daily_pnl'] is not None else "N/A"

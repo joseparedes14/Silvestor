@@ -1,6 +1,6 @@
 import sys
 import argparse
-from datetime import datetime, date
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from database import (
@@ -56,7 +56,9 @@ def calcular_portfolio_valor() -> dict:
 
 def tomar_snapshot(fecha: str = None) -> dict:
     if fecha is None:
-        fecha = date.today().isoformat()
+        fecha = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    elif len(fecha) <= 10:
+        fecha = fecha + " 00:00:00"
 
     valores = calcular_portfolio_valor()
     total_invertido = valores["total_invertido_eur"]
@@ -87,11 +89,11 @@ def mostrar_snapshots(limite: int = None):
         print("No hay snapshots registrados.")
         return
 
-    print(f"{'Fecha':<14} {'Invertido':<14} {'Valor':<14} {'P&L Diario':<14} {'P&L Acum.':<14}")
-    print("-" * 70)
+    print(f"{'Fecha':<22} {'Invertido':<14} {'Valor':<14} {'P&L Diario':<14} {'P&L Acum.':<14}")
+    print("-" * 78)
     for s in snapshots:
         dpnl = f"{s['daily_pnl']:+.2f}" if s['daily_pnl'] is not None else "N/A"
-        print(f"{s['fecha']:<14} {s['total_invertido']:<14,.2f} {s['total_valor']:<14,.2f} "
+        print(f"{s['fecha']:<22} {s['total_invertido']:<14,.2f} {s['total_valor']:<14,.2f} "
               f"{dpnl:<14} {s['cumulative_pnl']:<+.2f}")
 
 

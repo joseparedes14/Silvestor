@@ -40,7 +40,7 @@ def init_db():
         conn.execute("""
             CREATE TABLE IF NOT EXISTS daily_snapshots (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                fecha           TEXT NOT NULL UNIQUE,
+                fecha           TEXT NOT NULL,
                 total_invertido REAL NOT NULL,
                 total_valor     REAL NOT NULL,
                 daily_pnl       REAL,
@@ -52,6 +52,8 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_snapshots_fecha
             ON daily_snapshots(fecha)
         """)
+        # Migration: remove UNIQUE constraint from legacy schema
+        _migrar_snapshots(conn)
 
 
 def agregar_transaccion(
@@ -151,11 +153,6 @@ def guardar_snapshot(fecha: str, total_invertido: float, total_valor: float,
         cursor = conn.execute("""
             INSERT INTO daily_snapshots (fecha, total_invertido, total_valor, daily_pnl, cumulative_pnl)
             VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(fecha) DO UPDATE SET
-                total_invertido = excluded.total_invertido,
-                total_valor = excluded.total_valor,
-                daily_pnl = excluded.daily_pnl,
-                cumulative_pnl = excluded.cumulative_pnl
         """, (fecha, total_invertido, total_valor, daily_pnl, cumulative_pnl))
         return cursor.lastrowid
 
@@ -183,3 +180,35 @@ def obtener_snapshots_asc() -> list[dict]:
             "SELECT * FROM daily_snapshots ORDER BY fecha ASC"
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def _migrar_snapshots(conn):
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='daily_snapshots'"
+    ).fetchone()
+    if row and "UNIQUE" in row["sql"].upper():
+        conn.execute("ALTER TABLE daily_snapshots RENAME TO daily_snapshots_old")
+        conn.execute("""
+            CREATE TABLE daily_snapshots (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                fecha           TEXT NOT NULL,
+                total_invertido REAL NOT NULL,
+                total_valor     REAL NOT NULL,
+                daily_pnl       REAL,
+                cumulative_pnl  REAL NOT NULL,
+                created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        conn.execute("""
+            INSERT INTO daily_snapshots
+                (id, fecha, total_invertido, total_valor, daily_pnl, cumulative_pnl, created_at)
+            SELECT id,
+                   CASE WHEN length(fecha) <= 10 THEN fecha || ' 00:00:00' ELSE fecha END,
+                   total_invertido, total_valor, daily_pnl, cumulative_pnl, created_at
+            FROM daily_snapshots_old
+        """)
+        conn.execute("DROP TABLE daily_snapshots_old")
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_snapshots_fecha
+            ON daily_snapshots(fecha)
+        """)
