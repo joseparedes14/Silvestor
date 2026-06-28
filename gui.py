@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 
 from database import (
     init_db, agregar_transaccion, listar_transacciones,
-    eliminar_transaccion, obtener_portfolio,
+    eliminar_transaccion, eliminar_snapshot, obtener_portfolio,
     obtener_snapshots, obtener_snapshots_asc,
 )
 from fondos import (
@@ -155,8 +155,12 @@ class App(ctk.CTk):
         fila(3, "Nombre:", info.get("nombre", "---")[:45])
         fila(4, "NAV en fecha:", info.get("nav_str", "---"))
         tc = self._obtener_tc()
-        total_eur = convertir_a_eur(info.get("total", 0), tipo_cambio=tc)
-        fila(5, "Total estimado:", f"€{total_eur:,.2f}" if total_eur else f"${info.get('total', 0):,.2f}")
+        moneda = info.get("moneda", "USD")
+        total_eur = convertir_a_eur(info.get("total", 0), moneda, tc)
+        if total_eur:
+            fila(5, "Total estimado:", f"€{total_eur:,.2f}")
+        else:
+            fila(5, "Total estimado:", f"{info.get('total', 0):,.2f} {moneda}")
 
         self.preview_frame.grid()
         self.btn_agregar.configure(state="normal")
@@ -206,22 +210,23 @@ class App(ctk.CTk):
 
         ticker = info.get("ticker", "")
         nombre = info.get("nombre", isin)
+        moneda = info.get("moneda", "USD")
         nav = nav_hist if nav_hist is not None else info.get("precio_actual")
 
         total = round(participaciones * nav, 2) if nav else 0
         tc = self._obtener_tc()
-        nav_eur = convertir_a_eur(nav, tipo_cambio=tc) if nav else None
+        nav_eur = convertir_a_eur(nav, moneda, tc) if nav else None
         nav_str = f"€{nav_eur:,.4f}" if nav_eur else "---"
 
         self.after(0, lambda: self._completar_preview(
-            isin, ticker, nombre, nav, nav_str, total, fecha, participaciones
+            isin, ticker, nombre, moneda, nav, nav_str, total, fecha, participaciones
         ))
 
-    def _completar_preview(self, isin, ticker, nombre, nav, nav_str, total, fecha, participaciones):
+    def _completar_preview(self, isin, ticker, nombre, moneda, nav, nav_str, total, fecha, participaciones):
         self._mostrar_preview({
             "isin": isin, "ticker": ticker, "nombre": nombre,
-            "nav": nav, "nav_str": nav_str, "total": total,
-            "fecha": fecha, "participaciones": participaciones,
+            "moneda": moneda, "nav": nav, "nav_str": nav_str,
+            "total": total, "fecha": fecha, "participaciones": participaciones,
         })
         self.btn_preview.configure(state="normal", text="Previsualizar")
         self.set_status("Datos cargados. Revisa el preview y confirma.")
@@ -247,15 +252,16 @@ class App(ctk.CTk):
             messagebox.showwarning("Aviso", "No se pudo obtener el NAV en la fecha indicada.")
             return
 
-        trans_id = agregar_transaccion(isin, nombre, tipo, participaciones, precio, total, fecha, ticker=ticker)
+        moneda = info.get("moneda", "USD")
+        trans_id = agregar_transaccion(isin, nombre, tipo, participaciones, precio, total, fecha, moneda=moneda, ticker=ticker)
 
         tc = self._obtener_tc()
-        total_eur = convertir_a_eur(total, tipo_cambio=tc)
+        total_eur = convertir_a_eur(total, moneda, tc)
         self.set_status(f"Transacción #{trans_id} registrada: {tipo} de {participaciones} {isin}")
         if total_eur is not None:
             messagebox.showinfo("OK", f"Transacción registrada (ID: {trans_id})\nTotal: €{total_eur:,.2f}")
         else:
-            messagebox.showinfo("OK", f"Transacción registrada (ID: {trans_id})\nTotal: ${total:,.2f}")
+            messagebox.showinfo("OK", f"Transacción registrada (ID: {trans_id})\nTotal: {total:,.2f} {moneda}")
 
         self.entry_isin.delete(0, "end")
         self.entry_participaciones.delete(0, "end")
@@ -436,6 +442,12 @@ class App(ctk.CTk):
             command=self._tomar_snapshot_gui
         )
         self.btn_tomar_snapshot.pack(side="left", padx=5)
+        self.btn_eliminar_snapshot = ctk.CTkButton(
+            btn_frame, text="Eliminar Snapshot",
+            command=self._eliminar_snapshot_gui, fg_color="#b71c1c",
+            hover_color="#d32f2f"
+        )
+        self.btn_eliminar_snapshot.pack(side="right", padx=5)
         self.lbl_snap_status = ctk.CTkLabel(btn_frame, text="", font=("Segoe UI", 12))
         self.lbl_snap_status.pack(side="left", padx=10)
 
@@ -499,6 +511,18 @@ class App(ctk.CTk):
         self.lbl_snap_status.configure(text=msg, text_color=color)
         self._cargar_snapshots_gui()
 
+    def _eliminar_snapshot_gui(self):
+        sel = self.tree_snapshots.selection()
+        if not sel:
+            messagebox.showwarning("Aviso", "Selecciona un snapshot primero.")
+            return
+        snap_id = int(sel[0])
+        fecha = self.tree_snapshots.item(snap_id, "values")[0]
+        if messagebox.askyesno("Confirmar", f"¿Eliminar el snapshot del {fecha}?"):
+            eliminar_snapshot(snap_id)
+            self.set_status(f"Snapshot {fecha} eliminado.")
+            self._cargar_snapshots_gui()
+
     def _destruir_canvas(self):
         if self.snap_canvas:
             self.snap_canvas.get_tk_widget().destroy()
@@ -524,7 +548,7 @@ class App(ctk.CTk):
 
         for s in snapshots:
             dpnl = f"EUR {s['daily_pnl']:+.2f}" if s['daily_pnl'] is not None else "---"
-            self.tree_snapshots.insert("", "end", values=(
+            self.tree_snapshots.insert("", "end", iid=str(s["id"]), values=(
                 s["fecha"],
                 f"EUR {s['total_invertido']:,.2f}",
                 f"EUR {s['total_valor']:,.2f}",

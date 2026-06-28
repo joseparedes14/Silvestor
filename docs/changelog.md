@@ -10,6 +10,13 @@
 - **Migración automática**: Los snapshots existentes con solo fecha se convierten automáticamente al nuevo formato añadiendo `00:00:00`.
 - **CLI y GUI**: Ajustados los formatos de visualización para mostrar correctamente los timestamps en las tablas y gráficos.
 
+### Añadido
+- **Eliminar snapshots**: Nuevo botón "Eliminar Snapshot" en la pestaña "Historial" que permite borrar un snapshot seleccionado de la tabla. También se añadió la función `eliminar_snapshot()` en `database.py`.
+
+### Cambiado
+- **Detección de moneda mejorada**: Ahora `_extraer_moneda()` analiza tanto la tabla de perfil de FT como el nombre del fondo. Si el nombre contiene un código de moneda conocido (EUR, USD, GBP, etc.), este tiene prioridad sobre el valor extraído de la tabla de FT, ya que el nombre es más fiable. Corregido el caso del ISIN IE00B03HCZ61 cuyo precio está en EUR pero FT reportaba "Price currency: GBP".
+- **Propagación de moneda en GUI**: Las llamadas a `convertir_a_eur` en los métodos `_agregar_transaccion`, `_task_preview` y `_mostrar_preview` ahora pasan la moneda real del fondo en lugar de asumir USD por defecto. La moneda también se guarda correctamente en la transacción al agregarla desde la GUI.
+
 ### Corregido
 - **Gráfico interactivo de snapshots**: Se reescribió la generación del gráfico de la pestaña "Historial" para que funcione correctamente. Se corrigieron los siguientes problemas:
   - El `no_data_label` ahora se oculta adecuadamente al mostrar el gráfico (usando `grid_remove` en lugar de dejarlo superpuesto).

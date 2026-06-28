@@ -128,16 +128,50 @@ def _extraer_ticker(soup: BeautifulSoup) -> Optional[str]:
     return None
 
 
-def _extraer_moneda(soup: BeautifulSoup) -> str:
+_CURRENCY_FROM_NAME = [
+    (r"\bEUR\b", "EUR"),
+    (r"\bEuro\b", "EUR"),
+    (r"\bUSD\b", "USD"),
+    (r"\bUS Dollar\b", "USD"),
+    (r"\bGBP\b", "GBP"),
+    (r"\bSterling\b", "GBP"),
+    (r"\bPound\b", "GBP"),
+    (r"\bCHF\b", "CHF"),
+    (r"\bJPY\b", "JPY"),
+    (r"\bCAD\b", "CAD"),
+    (r"\bAUD\b", "AUD"),
+    (r"\bSEK\b", "SEK"),
+    (r"\bNOK\b", "NOK"),
+    (r"\bDKK\b", "DKK"),
+    (r"\bPLN\b", "PLN"),
+    (r"\bHKD\b", "HKD"),
+    (r"\bSGD\b", "SGD"),
+]
+
+
+def _extraer_moneda_desde_nombre(nombre: str) -> Optional[str]:
+    for patron, moneda in _CURRENCY_FROM_NAME:
+        if re.search(patron, nombre):
+            return moneda
+    return None
+
+
+def _extraer_moneda(soup: BeautifulSoup, nombre_fallback: str = "") -> str:
     table = soup.select_one(".mod-profile-and-investment-app__table--profile")
+    moneda_scrapeada = None
     if table:
         rows = table.select("tr")
         for row in rows:
             th = row.select_one("th")
             td = row.select_one("td")
             if th and td and "currency" in th.get_text(strip=True).lower():
-                return td.get_text(strip=True)
-    return "USD"
+                moneda_scrapeada = td.get_text(strip=True)
+                break
+    if nombre_fallback:
+        moneda_nombre = _extraer_moneda_desde_nombre(nombre_fallback)
+        if moneda_nombre:
+            return moneda_nombre
+    return moneda_scrapeada or "USD"
 
 
 def _extraer_datos_tabla(soup: BeautifulSoup) -> Optional[pd.DataFrame]:
@@ -300,7 +334,7 @@ def obtener_info_fondo(identificador: str) -> dict:
             return {"isin": identificador, "ticker": ticker, "nombre": identificador, "moneda": "USD", "precio_actual": None}
         soup = BeautifulSoup(resp.text, "html.parser")
         nombre = _extraer_nombre(soup)
-        moneda = _extraer_moneda(soup)
+        moneda = _extraer_moneda(soup, nombre)
         precio = _extraer_precio(soup)
         cambio = _extraer_cambio(soup)
         cambio_1y = _extraer_cambio_1y(soup)

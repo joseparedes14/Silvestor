@@ -174,6 +174,14 @@ def obtener_snapshots(limite: int = None) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def eliminar_snapshot(snapshot_id: int) -> bool:
+    with get_connection() as conn:
+        cursor = conn.execute(
+            "DELETE FROM daily_snapshots WHERE id = ?", (snapshot_id,)
+        )
+        return cursor.rowcount > 0
+
+
 def obtener_snapshots_asc() -> list[dict]:
     with get_connection() as conn:
         rows = conn.execute(
