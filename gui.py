@@ -289,7 +289,8 @@ class App(ctk.CTk):
         style.map("Treeview", background=[("selected", "#2e7d32")])
 
         cols = ("id", "fecha", "isin", "nombre", "tipo", "part", "nav_compra", "nav_actual", "cambio", "total", "valor_actual")
-        self.tree_inversiones = ttk.Treeview(frame, columns=cols, show="headings", height=12)
+        self.tree_inversiones = ttk.Treeview(frame, columns=cols, show="tree headings", height=12)
+        self.tree_inversiones.tag_configure("parent", font=("Segoe UI", 11, "bold"))
         headings = [
             ("id", "ID", 40),
             ("fecha", "Fecha", 95),
@@ -325,6 +326,15 @@ class App(ctk.CTk):
         self._cargar_inversiones_inicial()
         self.after(200, self._refrescar_inversiones_background)
 
+    def _agrupar_por_isin(self, transacciones):
+        grupos = {}
+        for t in transacciones:
+            isin = t["isin"]
+            if isin not in grupos:
+                grupos[isin] = {"transacciones": [], "nombre": t["nombre"]}
+            grupos[isin]["transacciones"].append(t)
+        return grupos
+
     def _cargar_inversiones_inicial(self):
         for row in self.tree_inversiones.get_children():
             self.tree_inversiones.delete(row)
@@ -334,16 +344,41 @@ class App(ctk.CTk):
             return
         tc = self._obtener_tc()
         total_inv_eur = 0
-        for t in transacciones:
-            moneda = t.get("moneda", "USD")
-            part = t["participaciones"]
-            precio_eur = convertir_a_eur(t["precio"], moneda, tc)
-            total_eur = convertir_a_eur(t["total"], moneda, tc)
-            total_inv_eur += total_eur or 0
-            self.tree_inversiones.insert("", "end", values=(
-                t["id"], t["fecha"], t["isin"], t["nombre"][:35], t["tipo"],
-                f"{part:.4f}", formatear(precio_eur), "---", "---", formatear(total_eur), "---",
+        grupos = self._agrupar_por_isin(transacciones)
+        for isin, grupo in grupos.items():
+            trans = grupo["transacciones"]
+            nombre = grupo["nombre"]
+            total_part = 0
+            total_inv = 0.0
+            for t in trans:
+                part = t["participaciones"]
+                if t["tipo"] == "compra":
+                    total_part += part
+                    total_inv += t["total"]
+                else:
+                    total_part -= part
+                    total_inv -= t["total"]
+            if total_part <= 0:
+                continue
+            moneda = trans[0].get("moneda", "USD")
+            total_inv_eur_isin = convertir_a_eur(total_inv, moneda, tc) or 0
+            total_inv_eur += total_inv_eur_isin
+            parent_id = f"isin_{isin}"
+            self.tree_inversiones.insert("", "end", iid=parent_id, open=True, tags=("parent",), values=(
+                "", "", isin, nombre[:35], "",
+                f"{total_part:.4f}", "---", "---", "---",
+                formatear(total_inv_eur_isin), "---",
             ))
+            for t in trans:
+                moneda_t = t.get("moneda", "USD")
+                part_t = t["participaciones"]
+                precio_eur = convertir_a_eur(t["precio"], moneda_t, tc)
+                total_eur = convertir_a_eur(t["total"], moneda_t, tc)
+                self.tree_inversiones.insert(parent_id, "end", iid=str(t["id"]), values=(
+                    t["id"], t["fecha"], isin, t["nombre"][:35], t["tipo"],
+                    f"{part_t:.4f}", formatear(precio_eur), "---", "---",
+                    formatear(total_eur), "---",
+                ))
         self.lbl_resumen_inv.configure(text=f"Total invertido: {formatear(total_inv_eur)}  |  Actualizando NAVs...")
         self.set_status("Cargando datos iniciales...")
 
@@ -373,37 +408,72 @@ class App(ctk.CTk):
 
         total_inv_eur = 0
         total_val_eur = 0
+        grupos = self._agrupar_por_isin(transacciones)
 
-        for t in transacciones:
-            isin = t["isin"]
+        for isin, grupo in grupos.items():
+            trans = grupo["transacciones"]
+            nombre = grupo["nombre"]
             nav_act = nav_cache.get(isin)
-            precio_compra = t["precio"]
-            part = t["participaciones"]
-            moneda = t.get("moneda", "USD")
+            total_part = 0
+            total_inv = 0.0
 
-            precio_compra_eur = convertir_a_eur(precio_compra, moneda, tc)
+            for t in trans:
+                part = t["participaciones"]
+                if t["tipo"] == "compra":
+                    total_part += part
+                    total_inv += t["total"]
+                else:
+                    total_part -= part
+                    total_inv -= t["total"]
+
+            if total_part <= 0:
+                continue
+
+            moneda = trans[0].get("moneda", "USD")
             nav_act_eur = convertir_a_eur(nav_act, moneda, tc) if nav_act else None
+            total_inv_eur_isin = convertir_a_eur(total_inv, moneda, tc) or 0
+            total_inv_eur += total_inv_eur_isin
 
-            if nav_act_eur and precio_compra_eur:
-                diff_eur = round(nav_act_eur - precio_compra_eur, 2)
-                diff_pct = round((diff_eur / precio_compra_eur) * 100, 2) if precio_compra_eur else 0
-                cambio_str = f"€{diff_eur:+.2f}"
-                val_act_eur = round(part * nav_act_eur, 2)
-                cambio_str += f" ({diff_pct:+.2f}%)"
+            if nav_act_eur and total_inv_eur_isin:
+                val_act_eur = round(total_part * nav_act_eur, 2)
+                diff_eur = round(val_act_eur - total_inv_eur_isin, 2)
+                diff_pct = round((diff_eur / total_inv_eur_isin) * 100, 2) if total_inv_eur_isin else 0
+                cambio_str = f"€{diff_eur:+.2f} ({diff_pct:+.2f}%)"
+                total_val_eur += val_act_eur
             else:
                 cambio_str = "---"
                 val_act_eur = None
 
-            total_inv_eur += convertir_a_eur(t["total"], moneda, tc) or 0
-            if val_act_eur is not None:
-                total_val_eur += val_act_eur
-
-            self.tree_inversiones.insert("", "end", values=(
-                t["id"], t["fecha"], isin, t["nombre"][:35], t["tipo"],
-                f"{part:.4f}", formatear(precio_compra_eur), formatear(nav_act_eur),
-                cambio_str, formatear(convertir_a_eur(t["total"], moneda, tc)),
+            parent_id = f"isin_{isin}"
+            self.tree_inversiones.insert("", "end", iid=parent_id, open=True, tags=("parent",), values=(
+                "", "", isin, nombre[:35], "",
+                f"{total_part:.4f}", "---", formatear(nav_act_eur),
+                cambio_str, formatear(total_inv_eur_isin),
                 formatear(val_act_eur) if val_act_eur else "---",
             ))
+
+            for t in trans:
+                moneda_t = t.get("moneda", "USD")
+                precio_compra = t["precio"]
+                part_t = t["participaciones"]
+                precio_compra_eur = convertir_a_eur(precio_compra, moneda_t, tc)
+                nav_act_eur_t = convertir_a_eur(nav_act, moneda_t, tc) if nav_act else None
+
+                if nav_act_eur_t and precio_compra_eur:
+                    diff_eur_t = round(nav_act_eur_t - precio_compra_eur, 2)
+                    diff_pct_t = round((diff_eur_t / precio_compra_eur) * 100, 2) if precio_compra_eur else 0
+                    cambio_str_t = f"€{diff_eur_t:+.2f} ({diff_pct_t:+.2f}%)"
+                    val_act_eur_t = round(part_t * nav_act_eur_t, 2)
+                else:
+                    cambio_str_t = "---"
+                    val_act_eur_t = None
+
+                self.tree_inversiones.insert(parent_id, "end", iid=str(t["id"]), values=(
+                    t["id"], t["fecha"], isin, t["nombre"][:35], t["tipo"],
+                    f"{part_t:.4f}", formatear(precio_compra_eur), formatear(nav_act_eur_t),
+                    cambio_str_t, formatear(convertir_a_eur(t["total"], moneda_t, tc)),
+                    formatear(val_act_eur_t) if val_act_eur_t else "---",
+                ))
 
         if total_val_eur > 0:
             gan_eur = round(total_val_eur - total_inv_eur, 2)
@@ -422,8 +492,11 @@ class App(ctk.CTk):
         if not sel:
             messagebox.showwarning("Aviso", "Selecciona una transacción primero.")
             return
-        item = self.tree_inversiones.item(sel[0])
-        trans_id = item["values"][0]
+        item_id = sel[0]
+        if item_id.startswith("isin_"):
+            messagebox.showwarning("Aviso", "Selecciona una transacción individual dentro del grupo (expande con la flecha).")
+            return
+        trans_id = int(item_id)
         if messagebox.askyesno("Confirmar", f"¿Eliminar la transacción #{trans_id}?"):
             eliminar_transaccion(trans_id)
             self.set_status(f"Transacción #{trans_id} eliminada.")
@@ -436,8 +509,10 @@ class App(ctk.CTk):
         sel = self.tree_inversiones.selection()
         if not sel:
             return
-        item = self.tree_inversiones.item(sel[0])
-        trans_id = item["values"][0]
+        item_id = sel[0]
+        if item_id.startswith("isin_"):
+            return
+        trans_id = int(item_id)
 
         transacciones = listar_transacciones()
         t = next((t for t in transacciones if t["id"] == trans_id), None)

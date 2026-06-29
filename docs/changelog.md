@@ -1,5 +1,16 @@
 # Changelog - Inversiones ETF
 
+## [1.4.0] - 2026-06-29
+
+### Añadido
+- **Agrupación por ISIN en tabla de inversiones**: Las transacciones con el mismo ISIN se agrupan bajo una fila principal que muestra la posición consolidada (participaciones netas, total invertido, valor actual y rentabilidad). Cada grupo es expandible/colapsable mediante una flecha en el margen izquierdo.
+- **Filas principales en negrita**: La fila resumen de cada ISIN se muestra en negrita para distinguirla visualmente de las transacciones individuales.
+
+### Cambiado
+- **Navegación jerárquica**: La tabla "Inversiones" usa ahora el modo árbol (`Treeview` con `show="tree headings"`), permitiendo expandir/colapsar grupos de transacciones por ISIN.
+- **NAV histórico en fila principal**: La columna "NAV en fecha" de la fila de grupo muestra `---` para evitar problemas de márgenes con la ponderación de múltiples compras.
+- **Selector individual requerido**: Las operaciones de eliminar y editar solo funcionan sobre transacciones individuales (hijos del grupo), no sobre la fila resumen del ISIN.
+
 ## [1.3.0] - 2026-06-28
 
 ### Eliminado
