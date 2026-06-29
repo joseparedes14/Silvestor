@@ -1,5 +1,7 @@
 import sqlite3
 import os
+import json
+import hashlib
 from datetime import datetime
 from typing import Optional
 
@@ -51,6 +53,13 @@ def init_db():
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_snapshots_fecha
             ON daily_snapshots(fecha)
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS rendimiento_cache (
+                estado_hash     TEXT PRIMARY KEY,
+                data            TEXT NOT NULL,
+                updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            )
         """)
         # Migration: remove UNIQUE constraint from legacy schema
         _migrar_snapshots(conn)
@@ -207,6 +216,33 @@ def obtener_snapshots_asc() -> list[dict]:
             "SELECT * FROM daily_snapshots ORDER BY fecha ASC"
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def obtener_estado_transacciones() -> str:
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, fecha, tipo, participaciones, precio, total, moneda, isin "
+            "FROM transacciones ORDER BY id"
+        ).fetchall()
+    state_str = json.dumps([dict(r) for r in rows], sort_keys=True, ensure_ascii=False)
+    return hashlib.md5(state_str.encode("utf-8")).hexdigest()
+
+
+def guardar_rendimiento_cache(estado_hash: str, data_json: str):
+    with get_connection() as conn:
+        conn.execute("""
+            INSERT OR REPLACE INTO rendimiento_cache (estado_hash, data, updated_at)
+            VALUES (?, ?, datetime('now'))
+        """, (estado_hash, data_json))
+
+
+def cargar_rendimiento_cache(estado_hash: str) -> Optional[str]:
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT data FROM rendimiento_cache WHERE estado_hash = ?",
+            (estado_hash,)
+        ).fetchone()
+    return row[0] if row else None
 
 
 def _migrar_snapshots(conn):

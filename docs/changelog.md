@@ -1,15 +1,21 @@
 # Changelog - Inversiones ETF
 
-## [1.4.0] - 2026-06-29
+## [2.0.0] - 2026-06-29
 
 ### Añadido
-- **Agrupación por ISIN en tabla de inversiones**: Las transacciones con el mismo ISIN se agrupan bajo una fila principal que muestra la posición consolidada (participaciones netas, total invertido, valor actual y rentabilidad). Cada grupo es expandible/colapsable mediante una flecha en el margen izquierdo.
-- **Filas principales en negrita**: La fila resumen de cada ISIN se muestra en negrita para distinguirla visualmente de las transacciones individuales.
+- **Gráfico de rendimiento histórico por NAV**: La pestaña "Historial" ahora muestra un gráfico de líneas del rendimiento del portafolio calculado a partir de los NAVs históricos de cada ISIN, muestreado cada 5 días. El rendimiento se calcula como `return(t) = valor_portfolio(t) / capital_invertido(t) - 1`.
+- **Caché de rendimiento**: Los resultados se guardan en una nueva tabla `rendimiento_cache` para evitar re-fetching de NAVs históricos en cada login. La caché se invalida automáticamente cuando cambian las transacciones (mediante hash del estado).
+- **Nueva función `calcular_serie_rendimiento()`** en `fondos.py`: calcula la serie de rendimientos usando datos históricos de NAV por ISIN, con posiciones incrementales (sin SQL por fecha de muestra).
+- **Botón "Recalcular"**: Permite forzar el recálculo manual del rendimiento histórico si se desea.
+
+### Eliminado
+- **Snapshots de la interfaz gráfica**: Se eliminó completamente la funcionalidad de snapshots de la pestaña "Historial" (botón "Tomar Snapshot Ahora", botón "Eliminar Snapshot", tabla de snapshots, gráfico de histograma de rendimientos diarios). La tabla `daily_snapshots` en la base de datos se conserva pero ya no se usa desde la GUI.
+- **Función `calcular_rendimientos_snapshots()`** en `fondos.py`: reemplazada por `calcular_serie_rendimiento()`.
+- **Dependencia de `snapshot.py`** en `gui.py`: ya no se importa `tomar_snapshot` desde la interfaz gráfica.
 
 ### Cambiado
-- **Navegación jerárquica**: La tabla "Inversiones" usa ahora el modo árbol (`Treeview` con `show="tree headings"`), permitiendo expandir/colapsar grupos de transacciones por ISIN.
-- **NAV histórico en fila principal**: La columna "NAV en fecha" de la fila de grupo muestra `---` para evitar problemas de márgenes con la ponderación de múltiples compras.
-- **Selector individual requerido**: Las operaciones de eliminar y editar solo funcionan sobre transacciones individuales (hijos del grupo), no sobre la fila resumen del ISIN.
+- **Importaciones en `gui.py`**: Actualizadas para usar los nuevos módulos de caché de rendimiento y eliminar referencias a snapshots.
+- **Pestaña Historial rediseñada**: La disposición ahora incluye solo un botón "Recalcular", una etiqueta de estado y el área del gráfico de líneas de rendimiento.
 
 ## [1.3.0] - 2026-06-28
 

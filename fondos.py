@@ -388,13 +388,70 @@ def obtener_datos_historicos(identificador: str, ticker: Optional[str] = None) -
         return None
 
 
-def _buscar_nav_en_df(df: pd.DataFrame, fecha: str, col_precio: str = "close") -> Optional[float]:
+def obtener_datos_historicos_rango(identificador: str, start_date: str, end_date: str, ticker: Optional[str] = None) -> Optional[pd.DataFrame]:
+    """
+    Obtiene NAVs históricos para un ISIN en el rango [start_date, end_date].
+    Usa el endpoint Ajax de FT con el rango completo; fallback a HTML o datos mensuales.
+    """
+    t = _resolver_ticker(identificador, ticker)
+    xid = None
+    df_diario = None
+
+    url = f"{FT_BASE}/historical?s={t}"
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        if resp.status_code == 200:
+            soup = BeautifulSoup(resp.text, "html.parser")
+            xid = _extraer_xid(soup)
+            df_diario = _extraer_datos_tabla(soup)
+    except Exception:
+        pass
+
+    # Ajax con el rango completo
+    if xid:
+        start = pd.Timestamp(start_date).strftime("%Y/%m/%d")
+        end = pd.Timestamp(end_date).strftime("%Y/%m/%d")
+        df_ajax = _obtener_datos_historicos_ajax(xid, start, end)
+        if df_ajax is not None and not df_ajax.empty:
+            return df_ajax
+
+    # Fallback a tabla HTML
+    if df_diario is not None:
+        return df_diario
+
+    # Fallback a datos mensuales
+    df_mensual = _obtener_datos_mensuales(t)
+    if df_mensual is not None and not df_mensual.empty:
+        nav_actual = obtener_precio_actual(identificador, ticker)
+        if nav_actual is not None and df_mensual["growth"].notna().any():
+            ultimo_growth = float(df_mensual["growth"].iloc[-1])
+            if ultimo_growth > 0:
+                df_mensual["close"] = df_mensual["growth"] * (nav_actual / ultimo_growth)
+                return df_mensual[["fecha", "close"]].copy()
+        return df_mensual.rename(columns={"growth": "close"})[["fecha", "close"]]
+
+    return None
+
+
+def _buscar_nav_en_df(df: pd.DataFrame, fecha: str, col_precio: str = "close", tolerancia_dias: int = 5) -> Optional[float]:
     target = pd.Timestamp(fecha)
-    mascara = df[col_precio].notna() & (df["fecha"] <= target)
+    mascara = df[col_precio].notna()
     if not mascara.any():
         return None
-    idx = df.loc[mascara, "fecha"].idxmax()
-    return float(df.loc[idx, col_precio])
+    valid = df.loc[mascara]
+    # NAV en o antes del target (forward fill normal)
+    mascara_anterior = valid["fecha"] <= target
+    if mascara_anterior.any():
+        idx = valid.loc[mascara_anterior, "fecha"].idxmax()
+        return float(valid.loc[idx, col_precio])
+    # Si no hay NAV anterior, buscar el más cercano hacia adelante (con tolerancia)
+    if tolerancia_dias > 0:
+        limite = target + pd.Timedelta(days=tolerancia_dias)
+        forward = valid[valid["fecha"] <= limite]
+        if not forward.empty:
+            idx = (forward["fecha"] - target).abs().idxmin()
+            return float(valid.loc[idx, col_precio])
+    return None
 
 
 def obtener_precio_historico_en_fecha(
@@ -820,3 +877,137 @@ def obtener_portfolio_completo(items: list[dict]) -> list[dict]:
             resultados[i] = pos
 
     return resultados
+
+
+def calcular_serie_rendimiento(transacciones, paso_dias=5, tc=None):
+    """
+    Calcula una serie de rendimientos cada `paso_dias` días usando NAVs históricos.
+
+    Para cada fecha de muestra:
+      - capital_invertido = suma acumulada de transacciones (compra - venta)
+                            con fecha <= fecha_muestra, convertidas a EUR
+      - valor_portfolio   = Σ (participaciones netas × NAV en EUR) por ISIN
+      - return_pct        = (valor_portfolio / capital_invertido - 1) × 100
+
+    Los NAVs históricos se obtienen una sola vez por ISIN vía obtener_datos_historicos_rango(),
+    usando el endpoint Ajax de FT para cubrir desde la inversión más antigua hasta hoy.
+    Las posiciones se actualizan incrementalmente (sin SQL por fecha).
+
+    Returns: dict con arrays: fechas, cumulative_capital, total_valor, return_pct
+             None si no hay datos suficientes.
+    """
+    if not transacciones:
+        return None
+
+    if tc is None:
+        tc = obtener_tipo_cambio()
+
+    tx_sorted = sorted(transacciones, key=lambda x: x["fecha"])
+
+    # Group transactions by ISIN
+    isin_groups = {}
+    for t in tx_sorted:
+        isin = t["isin"]
+        if isin not in isin_groups:
+            isin_groups[isin] = {
+                "moneda": t.get("moneda", "USD"),
+                "transactions": [],
+            }
+        isin_groups[isin]["transactions"].append(t)
+
+    # Fetch historical NAV data per ISIN in parallel over the full date range
+    start_fetch = tx_sorted[0]["fecha"][:10]
+    end_fetch = datetime.now().strftime("%Y-%m-%d")
+    hist_data = {}
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futuros = {executor.submit(obtener_datos_historicos_rango, isin, start_fetch, end_fetch): isin for isin in isin_groups}
+        for futuro in as_completed(futuros):
+            isin = futuros[futuro]
+            try:
+                df = futuro.result()
+                if df is not None and not df.empty:
+                    hist_data[isin] = df
+            except Exception:
+                pass
+
+    if not hist_data:
+        return None
+
+    start = pd.Timestamp(tx_sorted[0]["fecha"][:10])
+    end = pd.Timestamp.now()
+    date_range = pd.date_range(start=start, end=end, freq=f"{paso_dias}D")
+
+    if len(date_range) < 2:
+        return None
+
+    # Per-ISIN incremental state
+    pos = {}
+    for isin, g in isin_groups.items():
+        pos[isin] = {
+            "net_part": 0.0,
+            "total_inv_eur": 0.0,
+            "moneda": g["moneda"],
+            "tx_index": 0,
+            "transactions": g["transactions"],
+            "hist": hist_data.get(isin),
+        }
+
+    fechas = []
+    return_pcts = []
+    capitals = []
+    values = []
+
+    for date in date_range:
+        date_str = date.strftime("%Y-%m-%d")
+
+        # Apply pending transactions up to this date
+        for p in pos.values():
+            while p["tx_index"] < len(p["transactions"]):
+                t = p["transactions"][p["tx_index"]]
+                if t["fecha"][:10] <= date_str:
+                    part = t["participaciones"]
+                    total_eur = convertir_a_eur(t["total"], t.get("moneda", "USD"), tc) or 0
+                    if t["tipo"] == "compra":
+                        p["net_part"] += part
+                        p["total_inv_eur"] += total_eur
+                    else:
+                        p["net_part"] -= part
+                        p["total_inv_eur"] -= total_eur
+                    p["tx_index"] += 1
+                else:
+                    break
+
+        # Capital and portfolio value (only ISINs with NAV data)
+        cumulative_capital = 0.0
+        portfolio_value = 0.0
+        for p in pos.values():
+            if p["hist"] is None:
+                continue
+            cumulative_capital += p["total_inv_eur"]
+            if p["net_part"] <= 0:
+                continue
+            nav = _buscar_nav_en_df(p["hist"], date_str)
+            if nav is None:
+                continue
+            nav_eur = convertir_a_eur(nav, p["moneda"], tc) or 0
+            portfolio_value += p["net_part"] * nav_eur
+
+        if cumulative_capital <= 0 or portfolio_value <= 0:
+            continue
+
+        return_pct = (portfolio_value / cumulative_capital - 1) * 100
+
+        fechas.append(date_str)
+        return_pcts.append(return_pct)
+        capitals.append(cumulative_capital)
+        values.append(portfolio_value)
+
+    if len(fechas) < 2:
+        return None
+
+    return {
+        "fechas": np.array(fechas, dtype="datetime64"),
+        "return_pct": np.array(return_pcts),
+        "cumulative_capital": np.array(capitals),
+        "total_valor": np.array(values),
+    }
